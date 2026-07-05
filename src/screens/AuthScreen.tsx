@@ -8,6 +8,7 @@ import Alert from '@mui/material/Alert';
 import Stack from '@mui/material/Stack';
 import Divider from '@mui/material/Divider';
 import CircularProgress from '@mui/material/CircularProgress';
+import Google from '@mui/icons-material/Google';
 import { supabase } from '../lib/supabase';
 
 export default function AuthScreen() {
@@ -15,6 +16,7 @@ export default function AuthScreen() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  const [googleLoading, setGoogleLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
@@ -36,6 +38,34 @@ export default function AuthScreen() {
       setError(err instanceof Error ? err.message : 'Something went wrong');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleGoogleSignIn = async () => {
+    setError('');
+    setSuccess('');
+    setGoogleLoading(true);
+    try {
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: window.location.origin,
+        },
+      });
+      if (error) throw error;
+    } catch (err: unknown) {
+      setGoogleLoading(false);
+      if (err instanceof Error) {
+        if (err.message.includes('cancelled')) {
+          setError('Sign-in was cancelled.');
+        } else if (err.message.includes('exists')) {
+          setError('An account with this email already exists. Try signing in instead.');
+        } else {
+          setError(err.message);
+        }
+      } else {
+        setError('Failed to sign in with Google. Please try again.');
+      }
     }
   };
 
@@ -84,6 +114,34 @@ export default function AuthScreen() {
           </Alert>
         )}
 
+        {/* Google Sign-In */}
+        <Button
+          variant="outlined"
+          size="large"
+          fullWidth
+          onClick={handleGoogleSignIn}
+          disabled={googleLoading || loading}
+          startIcon={googleLoading ? undefined : <Google />}
+          sx={{
+            py: 3.5,
+            borderColor: 'divider',
+            bgcolor: 'transparent',
+            '&:hover': { bgcolor: 'action.hover', borderColor: 'divider' },
+          }}
+        >
+          {googleLoading ? (
+            <CircularProgress size={18} thickness={2.5} />
+          ) : (
+            'Continue with Google'
+          )}
+        </Button>
+
+        <Divider sx={{ my: 5 }}>
+          <Typography variant="caption" sx={{ color: 'text.secondary', px: 2 }}>
+            or continue with email
+          </Typography>
+        </Divider>
+
         {/* Form */}
         <Box component="form" onSubmit={handleSubmit}>
           <Stack spacing={3}>
@@ -113,7 +171,7 @@ export default function AuthScreen() {
               variant="contained"
               size="large"
               fullWidth
-              disabled={loading}
+              disabled={loading || googleLoading}
               sx={{ mt: 1, py: 3.5 }}
             >
               {loading ? (
