@@ -303,26 +303,19 @@ export default function FeedScreen() {
       prev.map((p) => (p.id === post.id ? { ...p, share_count: p.share_count + 1 } : p))
     );
 
-    // Track in DB
-    await supabase
-      .from('posts')
-      .update({ share_count: post.share_count + 1 })
-      .eq('id', post.id);
+    // Track in DB via secure RPC
+    await supabase.rpc('increment_post_share_count', { post_id: post.id });
 
     if (navigator.share && navigator.canShare?.(shareData)) {
       try {
         await navigator.share(shareData);
       } catch {
-        // User cancelled share — revert count
+        // User cancelled share — revert count (no DB revert; count already incremented)
         setPosts((prev) =>
           prev.map((p) =>
             p.id === post.id ? { ...p, share_count: Math.max(0, p.share_count - 1) } : p
           )
         );
-        await supabase
-          .from('posts')
-          .update({ share_count: Math.max(0, post.share_count) })
-          .eq('id', post.id);
       }
     } else {
       await navigator.clipboard.writeText(url).catch(() => {});

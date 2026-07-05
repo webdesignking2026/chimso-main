@@ -261,7 +261,7 @@ export default function ProfileScreen() {
       arr.map((p) => (p.id === post.id ? { ...p, share_count: (p.share_count || 0) + 1 } : p));
     setPosts(updateCount);
     setSavedPosts(updateCount);
-    await supabase.from('posts').update({ share_count: (post.share_count || 0) + 1 }).eq('id', post.id);
+    await supabase.rpc('increment_post_share_count', { post_id: post.id });
 
     if (navigator.share && navigator.canShare?.(shareData)) {
       await navigator.share(shareData).catch(() => {});
