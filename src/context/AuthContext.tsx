@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import type { User, Session } from '@supabase/supabase-js';
 import { supabase } from '../lib/supabase';
 import type { Profile } from '../lib/supabase';
@@ -24,6 +24,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
+  const initializedRef = useRef(false);
 
   const loadProfile = async (userId: string) => {
     const { data } = await supabase
@@ -39,7 +40,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   useEffect(() => {
+    // Load persisted session on mount
     supabase.auth.getSession().then(({ data: { session } }) => {
+      initializedRef.current = true;
       setSession(session);
       setUser(session?.user ?? null);
       if (session?.user) {
@@ -49,13 +52,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
     });
 
+    // Listen for subsequent auth changes (sign in, sign out, token refresh)
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      // Skip the INITIAL_SESSION event — handled by getSession() above
+      if (!initializedRef.current) return;
+
       setSession(session);
       setUser(session?.user ?? null);
       if (session?.user) {
-        (async () => {
-          await loadProfile(session.user.id);
-        })();
+        loadProfile(session.user.id);
       } else {
         setProfile(null);
       }

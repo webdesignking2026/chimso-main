@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import Box from '@mui/material/Box';
 import Container from '@mui/material/Container';
 import Typography from '@mui/material/Typography';
@@ -32,6 +33,7 @@ import type { Post, Niche } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import MainLayout from '../components/MainLayout';
 import PostCommentDrawer from '../components/PostCommentDrawer';
+import EditPostDialog from '../components/EditPostDialog';
 
 type PostWithRelations = Post & {
   profiles: { display_name: string; avatar_url: string; username: string | null };
@@ -39,6 +41,7 @@ type PostWithRelations = Post & {
 };
 
 export default function FeedScreen() {
+  const navigate = useNavigate();
   const { user, profile } = useAuth();
   const [posts, setPosts] = useState<PostWithRelations[]>([]);
   const [myNiches, setMyNiches] = useState<Niche[]>([]);
@@ -52,6 +55,8 @@ export default function FeedScreen() {
   const [bookmarked, setBookmarked] = useState<Set<string>>(new Set());
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
   const [menuPost, setMenuPost] = useState<string>('');
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [editingPost, setEditingPost] = useState<PostWithRelations | null>(null);
   const [snackbar, setSnackbar] = useState('');
   const [composeFocused, setComposeFocused] = useState(false);
   const [selectedImages, setSelectedImages] = useState<string[]>([]);
@@ -188,6 +193,24 @@ export default function FeedScreen() {
     setSnackbar('Post deleted.');
   };
 
+  const handleOpenEdit = () => {
+    const post = posts.find((p) => p.id === menuPost) ?? null;
+    setEditingPost(post);
+    setEditDialogOpen(true);
+    setAnchorEl(null);
+  };
+
+  const handleEditSaved = (updated: Partial<Post>) => {
+    setPosts((prev) =>
+      prev.map((p) =>
+        p.id === updated.id
+          ? { ...p, content: updated.content ?? p.content, image_urls: updated.image_urls ?? p.image_urls, updated_at: updated.updated_at ?? p.updated_at }
+          : p
+      )
+    );
+    setSnackbar('Post updated.');
+  };
+
   const toggleLike = async (postId: string) => {
     if (!user) return;
     const isLiked = liked.has(postId);
@@ -268,7 +291,7 @@ export default function FeedScreen() {
 
   const handleShare = async (post: PostWithRelations) => {
     if (!user) return;
-    const url = `${window.location.origin}/profile/${post.profiles.username || post.profile_id}`;
+    const url = `${window.location.origin}/post/${post.id}`;
     const shareData = {
       title: `${post.profiles.display_name} on Chimso`,
       text: post.content.slice(0, 100),
@@ -571,7 +594,8 @@ export default function FeedScreen() {
                     <Stack direction="row" spacing={3} alignItems="flex-start">
                       <Avatar
                         src={post.profiles.avatar_url || undefined}
-                        sx={{ width: 40, height: 40, fontSize: '0.875rem', flexShrink: 0, mt: 0.25 }}
+                        onClick={() => navigate(`/${post.profiles.username || post.profile_id}`)}
+                        sx={{ width: 40, height: 40, fontSize: '0.875rem', flexShrink: 0, mt: 0.25, cursor: 'pointer' }}
                       >
                         {initials(post.profiles.display_name)}
                       </Avatar>
@@ -579,12 +603,19 @@ export default function FeedScreen() {
                       <Box sx={{ flex: 1, minWidth: 0 }}>
                         <Stack direction="row" alignItems="flex-start" justifyContent="space-between">
                           <Stack direction="row" alignItems="center" spacing={1.5} flexWrap="wrap">
-                            <Typography variant="subtitle1" sx={{ color: 'text.primary', fontWeight: 600 }}>
+                            <Typography
+                              variant="subtitle1"
+                              onClick={() => navigate(`/${post.profiles.username || post.profile_id}`)}
+                              sx={{ color: 'text.primary', fontWeight: 600, cursor: 'pointer', '&:hover': { textDecoration: 'underline' } }}
+                            >
                               {post.profiles.display_name}
                             </Typography>
                             <Typography variant="caption" sx={{ color: 'text.secondary' }}>
                               {formatTime(post.created_at)}
                             </Typography>
+                            {post.updated_at && new Date(post.updated_at).getTime() - new Date(post.created_at).getTime() > 5000 && (
+                              <Typography variant="caption" sx={{ color: 'text.disabled' }}>· Edited</Typography>
+                            )}
                             <Chip label={post.niches.name} size="small" variant="filled" />
                           </Stack>
                           {isOwn && (
@@ -598,7 +629,7 @@ export default function FeedScreen() {
                           )}
                         </Stack>
 
-                        <Typography variant="body1" sx={{ mt: 1.5, color: 'text.primary', wordBreak: 'break-word' }}>
+                        <Typography variant="body1" sx={{ mt: 1.5, color: 'text.primary', wordBreak: 'break-word', whiteSpace: 'pre-wrap' }}>
                           {post.content}
                         </Typography>
 
@@ -703,10 +734,20 @@ export default function FeedScreen() {
 
       {/* Context menu */}
       <Menu anchorEl={anchorEl} open={Boolean(anchorEl)} onClose={() => setAnchorEl(null)}>
+        <MenuItem onClick={handleOpenEdit} sx={{ fontSize: '0.9375rem' }}>
+          Edit post
+        </MenuItem>
         <MenuItem onClick={() => handleDelete(menuPost)} sx={{ color: 'error.main', fontSize: '0.9375rem' }}>
           Delete post
         </MenuItem>
       </Menu>
+
+      <EditPostDialog
+        post={editingPost}
+        open={editDialogOpen}
+        onClose={() => setEditDialogOpen(false)}
+        onSaved={handleEditSaved}
+      />
 
       <Snackbar
         open={Boolean(snackbar)}

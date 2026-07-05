@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import Drawer from '@mui/material/Drawer';
 import Box from '@mui/material/Box';
 import Stack from '@mui/material/Stack';
@@ -52,6 +53,7 @@ function initials(name: string) {
 }
 
 export default function PostCommentDrawer({ postId, open, onClose, onCommentAdded }: Props) {
+  const navigate = useNavigate();
   const { user, profile } = useAuth();
   const [comments, setComments] = useState<Comment[]>([]);
   const [loading, setLoading] = useState(false);
@@ -154,20 +156,25 @@ export default function PostCommentDrawer({ postId, open, onClose, onCommentAdde
                 <Stack direction="row" spacing={2}>
                   <Avatar
                     src={comment.profiles.avatar_url || undefined}
-                    sx={{ width: 36, height: 36, fontSize: '0.75rem', flexShrink: 0 }}
+                    onClick={() => { onClose(); navigate(`/${comment.profiles.username || comment.profile_id}`); }}
+                    sx={{ width: 36, height: 36, fontSize: '0.75rem', flexShrink: 0, cursor: 'pointer' }}
                   >
                     {initials(comment.profiles.display_name)}
                   </Avatar>
                   <Box sx={{ flex: 1 }}>
                     <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.5 }}>
-                      <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+                      <Typography
+                        variant="subtitle2"
+                        onClick={() => { onClose(); navigate(`/${comment.profiles.username || comment.profile_id}`); }}
+                        sx={{ fontWeight: 600, cursor: 'pointer', '&:hover': { textDecoration: 'underline' } }}
+                      >
                         {comment.profiles.display_name}
                       </Typography>
                       <Typography variant="caption" sx={{ color: 'text.secondary' }}>
                         {formatTime(comment.created_at)}
                       </Typography>
                     </Stack>
-                    <Typography variant="body2" sx={{ wordBreak: 'break-word' }}>
+                    <Typography variant="body2" sx={{ wordBreak: 'break-word', whiteSpace: 'pre-wrap' }}>
                       {comment.content}
                     </Typography>
                   </Box>

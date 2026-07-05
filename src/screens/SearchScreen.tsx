@@ -217,9 +217,17 @@ export default function SearchScreen() {
                 </Stack>
                 {results.posts.map((post) => (
                   <Box key={post.id} sx={{ py: 3, borderBottom: '1px solid', borderColor: 'divider' }}>
-                    <Typography variant="body1">{post.content}</Typography>
-                    <Typography variant="caption" sx={{ color: 'text.secondary', mt: 1, display: 'block' }}>
-                      by {post.profiles?.display_name}
+                    <Stack direction="row" spacing={1.5} alignItems="center" sx={{ mb: 1, cursor: 'pointer' }}
+                      onClick={() => navigate(`/${post.profiles?.username || post.profile_id}`)}>
+                      <Avatar src={post.profiles?.avatar_url || undefined} sx={{ width: 28, height: 28, fontSize: '0.7rem' }}>
+                        {post.profiles?.display_name ? initials(post.profiles.display_name) : '?'}
+                      </Avatar>
+                      <Typography variant="caption" sx={{ color: 'text.secondary', fontWeight: 500, '&:hover': { textDecoration: 'underline' } }}>
+                        {post.profiles?.display_name}
+                      </Typography>
+                    </Stack>
+                    <Typography variant="body1" sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                      {post.content.length > 200 ? `${post.content.slice(0, 200)}...` : post.content}
                     </Typography>
                   </Box>
                 ))}

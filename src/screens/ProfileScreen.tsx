@@ -13,6 +13,9 @@ import Tab from '@mui/material/Tab';
 import IconButton from '@mui/material/IconButton';
 import ImageList from '@mui/material/ImageList';
 import ImageListItem from '@mui/material/ImageListItem';
+import Menu from '@mui/material/Menu';
+import MenuItem from '@mui/material/MenuItem';
+import Snackbar from '@mui/material/Snackbar';
 import SettingsIcon from '@mui/icons-material/Settings';
 import ChatBubbleOutlineIcon from '@mui/icons-material/ChatBubbleOutline';
 import FavoriteBorderIcon from '@mui/icons-material/FavoriteBorder';
@@ -22,11 +25,13 @@ import BookmarkIcon from '@mui/icons-material/Bookmark';
 import ShareIcon from '@mui/icons-material/Share';
 import MilitaryTechIcon from '@mui/icons-material/MilitaryTech';
 import PhotoCameraIcon from '@mui/icons-material/PhotoCamera';
+import MoreHorizIcon from '@mui/icons-material/MoreHoriz';
 import { supabase } from '../lib/supabase';
 import type { Profile, Post, ProfileBadge } from '../lib/supabase';
 import MainLayout from '../components/MainLayout';
 import { useAuth } from '../context/AuthContext';
 import PostCommentDrawer from '../components/PostCommentDrawer';
+import EditPostDialog from '../components/EditPostDialog';
 
 type ProfileWithExtras = Profile & {
   badges?: ProfileBadge[];
@@ -47,6 +52,11 @@ export default function ProfileScreen() {
   const [bookmarked, setBookmarked] = useState<Set<string>>(new Set());
   const [uploadingCover, setUploadingCover] = useState(false);
   const [commentDrawerPostId, setCommentDrawerPostId] = useState<string | null>(null);
+  const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
+  const [menuPost, setMenuPost] = useState<string>('');
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [editingPost, setEditingPost] = useState<Post | null>(null);
+  const [snackbar, setSnackbar] = useState('');
   const coverInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -212,9 +222,36 @@ export default function ProfileScreen() {
     }
   };
 
+  const handleOpenEdit = () => {
+    const post = posts.find((p) => p.id === menuPost) ?? savedPosts.find((p) => p.id === menuPost) ?? null;
+    setEditingPost(post);
+    setEditDialogOpen(true);
+    setAnchorEl(null);
+  };
+
+  const handleEditSaved = (updated: Partial<Post>) => {
+    const apply = (arr: Post[]) =>
+      arr.map((p) =>
+        p.id === updated.id
+          ? { ...p, content: updated.content ?? p.content, image_urls: updated.image_urls ?? p.image_urls, updated_at: updated.updated_at ?? p.updated_at }
+          : p
+      );
+    setPosts(apply);
+    setSavedPosts(apply);
+    setSnackbar('Post updated.');
+  };
+
+  const handleDeletePost = async (postId: string) => {
+    setAnchorEl(null);
+    await supabase.from('posts').delete().eq('id', postId);
+    setPosts((prev) => prev.filter((p) => p.id !== postId));
+    setSavedPosts((prev) => prev.filter((p) => p.id !== postId));
+    setSnackbar('Post deleted.');
+  };
+
   const handleShare = async (post: Post) => {
     if (!profile) return;
-    const url = `${window.location.origin}/profile/${profile.username || profile.id}`;
+    const url = `${window.location.origin}/post/${post.id}`;
     const shareData = {
       title: `${profile.display_name} on Chimso`,
       text: post.content.slice(0, 100),
@@ -267,11 +304,21 @@ export default function ProfileScreen() {
     const isLiked = liked.has(post.id);
     const isBookmarked = bookmarked.has(post.id);
     const images = getPostImages(post);
+    const isOwnPost = post.profile_id === user?.id;
 
     return (
       <Box key={post.id}>
-        <Box sx={{ py: 3 }}>
-          <Typography variant="body1">{post.content}</Typography>
+        <Box sx={{ py: 3, position: 'relative' }}>
+          {isOwnPost && (
+            <IconButton
+              size="small"
+              sx={{ color: 'text.secondary', position: 'absolute', top: 16, right: -8 }}
+              onClick={(e) => { setAnchorEl(e.currentTarget); setMenuPost(post.id); }}
+            >
+              <MoreHorizIcon sx={{ fontSize: 18 }} />
+            </IconButton>
+          )}
+          <Typography variant="body1" sx={{ wordBreak: 'break-word', whiteSpace: 'pre-wrap', pr: isOwnPost ? 4 : 0 }}>{post.content}</Typography>
 
           {images.length > 0 && (
             <Box sx={{ mt: 2, borderRadius: 2, overflow: 'hidden' }}>
@@ -342,6 +389,9 @@ export default function ProfileScreen() {
 
           <Typography variant="caption" sx={{ color: 'text.secondary', mt: 1, display: 'block' }}>
             {formatTime(post.created_at)} in {(post.niches as { name: string } | null)?.name || 'general'}
+            {post.updated_at && new Date(post.updated_at).getTime() - new Date(post.created_at).getTime() > 5000 && (
+              <Box component="span" sx={{ color: 'text.disabled' }}> · Edited</Box>
+            )}
           </Typography>
         </Box>
         {idx < arr.length - 1 && <Divider />}
@@ -565,11 +615,31 @@ export default function ProfileScreen() {
         )}
       </Container>
 
+      <Menu anchorEl={anchorEl} open={Boolean(anchorEl)} onClose={() => setAnchorEl(null)}>
+        <MenuItem onClick={handleOpenEdit} sx={{ fontSize: '0.9375rem' }}>Edit post</MenuItem>
+        <MenuItem onClick={() => handleDeletePost(menuPost)} sx={{ color: 'error.main', fontSize: '0.9375rem' }}>Delete post</MenuItem>
+      </Menu>
+
+      <EditPostDialog
+        post={editingPost}
+        open={editDialogOpen}
+        onClose={() => setEditDialogOpen(false)}
+        onSaved={handleEditSaved}
+      />
+
       <PostCommentDrawer
         postId={commentDrawerPostId}
         open={Boolean(commentDrawerPostId)}
         onClose={() => setCommentDrawerPostId(null)}
         onCommentAdded={handleCommentAdded}
+      />
+
+      <Snackbar
+        open={Boolean(snackbar)}
+        autoHideDuration={3000}
+        onClose={() => setSnackbar('')}
+        message={snackbar}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
       />
     </MainLayout>
   );

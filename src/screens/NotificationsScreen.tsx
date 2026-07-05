@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import Box from '@mui/material/Box';
 import Container from '@mui/material/Container';
 import Typography from '@mui/material/Typography';
@@ -26,6 +27,7 @@ const notificationIcons: Record<string, React.ReactElement> = {
 };
 
 export default function NotificationsScreen() {
+  const navigate = useNavigate();
   const { user } = useAuth();
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [loading, setLoading] = useState(true);
@@ -39,7 +41,7 @@ export default function NotificationsScreen() {
     if (!user) return;
     const { data } = await supabase
       .from('notifications')
-      .select('*, profiles(display_name, avatar_url)')
+      .select('*, profiles(display_name, avatar_url, username)')
       .eq('profile_id', user.id)
       .order('created_at', { ascending: false })
       .limit(100);
@@ -117,7 +119,7 @@ export default function NotificationsScreen() {
         ) : (
           notifications.map((notification, idx) => {
             const isRead = !!notification.read_at;
-            const actor = notification.profiles as { display_name: string; avatar_url: string } | undefined;
+            const actor = notification.profiles as { display_name: string; avatar_url: string; username: string | null } | undefined;
             return (
               <Box key={notification.id}>
                 <Box
@@ -136,7 +138,8 @@ export default function NotificationsScreen() {
                     <Box sx={{ position: 'relative' }}>
                       <Avatar
                         src={actor?.avatar_url || undefined}
-                        sx={{ width: 44, height: 44 }}
+                        onClick={(e) => { e.stopPropagation(); if (actor) navigate(`/${actor.username || notification.actor_id}`); }}
+                        sx={{ width: 44, height: 44, cursor: actor ? 'pointer' : 'default' }}
                       >
                         {actor ? initials(actor.display_name) : '?'}
                       </Avatar>

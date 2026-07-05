@@ -23,6 +23,7 @@ import EventDetailScreen from './screens/EventDetailScreen';
 import LearningScreen from './screens/LearningScreen';
 import LearningTrackScreen from './screens/LearningTrackScreen';
 import SettingsScreen from './screens/SettingsScreen';
+import PostDetailScreen from './screens/PostDetailScreen';
 import { supabase } from './lib/supabase';
 
 function LoadingScreen() {
@@ -85,6 +86,7 @@ function AppRoutes() {
       <Route path="/learn" element={<ProtectedRoute><LearningScreen /></ProtectedRoute>} />
       <Route path="/learn/:id" element={<ProtectedRoute><LearningTrackScreen /></ProtectedRoute>} />
       <Route path="/settings" element={<ProtectedRoute><SettingsScreen /></ProtectedRoute>} />
+      <Route path="/post/:id" element={<ProtectedRoute><PostDetailScreen /></ProtectedRoute>} />
       <Route path="/:username" element={<ProtectedRoute><ProfileScreen /></ProtectedRoute>} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
