@@ -41,7 +41,7 @@ type ProfileWithExtras = Profile & {
 export default function ProfileScreen() {
   const { username } = useParams();
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, refreshProfile } = useAuth();
   const [profile, setProfile] = useState<ProfileWithExtras | null>(null);
   const [posts, setPosts] = useState<Post[]>([]);
   const [savedPosts, setSavedPosts] = useState<Post[]>([]);
@@ -68,6 +68,39 @@ export default function ProfileScreen() {
       loadSavedPosts();
     }
   }, [tab]);
+
+  // Real-time subscription: keep follower/following counts in sync with the DB
+  useEffect(() => {
+    if (!profile?.id) return;
+
+    const channel = supabase
+      .channel(`profile-counts-${profile.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'profiles',
+          filter: `id=eq.${profile.id}`,
+        },
+        (payload) => {
+          const updated = payload.new as Partial<Profile>;
+          setProfile((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  follower_count: updated.follower_count ?? prev.follower_count,
+                  following_count: updated.following_count ?? prev.following_count,
+                  post_count: updated.post_count ?? prev.post_count,
+                }
+              : null
+          );
+        }
+      )
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, [profile?.id]);
 
   const loadProfile = async () => {
     if (!username || !user) return;
@@ -147,12 +180,22 @@ export default function ProfileScreen() {
   const handleFollow = async () => {
     if (!profile || !user) return;
     if (following) {
-      await supabase.from('follows').delete().match({ follower_id: user.id, following_id: profile.id });
+      // Optimistic update
       setFollowing(false);
+      setProfile((prev) =>
+        prev ? { ...prev, follower_count: Math.max(0, (prev.follower_count || 0) - 1) } : null
+      );
+      await supabase.from('follows').delete().match({ follower_id: user.id, following_id: profile.id });
     } else {
-      await supabase.from('follows').insert({ follower_id: user.id, following_id: profile.id });
+      // Optimistic update
       setFollowing(true);
+      setProfile((prev) =>
+        prev ? { ...prev, follower_count: (prev.follower_count || 0) + 1 } : null
+      );
+      await supabase.from('follows').insert({ follower_id: user.id, following_id: profile.id });
     }
+    // Refresh the auth context profile so the current user's following_count updates everywhere
+    refreshProfile();
   };
 
   const handleCoverUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {

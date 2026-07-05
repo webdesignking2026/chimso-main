@@ -35,6 +35,44 @@ export default function NotificationsScreen() {
   useEffect(() => {
     if (!user) return;
     loadNotifications();
+
+    // Real-time subscription: new notifications appear instantly
+    const channel = supabase
+      .channel(`notifications-screen-${user.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'notifications',
+          filter: `profile_id=eq.${user.id}`,
+        },
+        async (payload) => {
+          if (payload.eventType === 'INSERT') {
+            // Fetch the full notification row with actor profile (the raw INSERT
+            // payload doesn't include joined data)
+            const { data } = await supabase
+              .from('notifications')
+              .select('*, profiles(display_name, avatar_url, username)')
+              .eq('id', (payload.new as { id: string }).id)
+              .maybeSingle();
+            if (data) {
+              setNotifications((prev) => [data as Notification, ...prev]);
+            }
+          } else if (payload.eventType === 'UPDATE') {
+            const updated = payload.new as Notification;
+            setNotifications((prev) =>
+              prev.map((n) => (n.id === updated.id ? { ...n, ...updated } : n))
+            );
+          } else if (payload.eventType === 'DELETE') {
+            const deleted = payload.old as { id: string };
+            setNotifications((prev) => prev.filter((n) => n.id !== deleted.id));
+          }
+        }
+      )
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
   }, [user]);
 
   const loadNotifications = async () => {

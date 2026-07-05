@@ -1,7 +1,9 @@
+import { useState, useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import Box from '@mui/material/Box';
 import Container from '@mui/material/Container';
 import Stack from '@mui/material/Stack';
+import Badge from '@mui/material/Badge';
 import HomeOutlinedIcon from '@mui/icons-material/HomeOutlined';
 import HomeIcon from '@mui/icons-material/Home';
 import SearchIcon from '@mui/icons-material/Search';
@@ -13,21 +15,68 @@ import PersonOutlineIcon from '@mui/icons-material/PersonOutline';
 import PersonIcon from '@mui/icons-material/Person';
 import AddIcon from '@mui/icons-material/Add';
 import { useAuth } from '../context/AuthContext';
+import { supabase } from '../lib/supabase';
 
 type BottomTab = 'home' | 'search' | 'communities' | 'notifications' | 'profile';
 
 export default function MainLayout({ children }: { children: React.ReactNode }) {
   const location = useLocation();
   const navigate = useNavigate();
-  const { profile } = useAuth();
+  const { profile, user } = useAuth();
+  const [unreadCount, setUnreadCount] = useState(0);
+
+  // Profile path: prefer username, fall back to user ID so the profile page
+  // can always look up the current user even before username is set.
+  const profilePath = `/${profile?.username || user?.id || 'me'}`;
+
+  useEffect(() => {
+    if (!user) return;
+
+    // Load initial unread count
+    supabase
+      .from('notifications')
+      .select('id', { count: 'exact', head: true })
+      .eq('profile_id', user.id)
+      .is('read_at', null)
+      .then(({ count }) => setUnreadCount(count ?? 0));
+
+    // Subscribe to notification changes for live badge updates
+    const channel = supabase
+      .channel(`notifications-badge-${user.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'notifications',
+          filter: `profile_id=eq.${user.id}`,
+        },
+        (payload) => {
+          if (payload.eventType === 'INSERT') {
+            setUnreadCount((prev) => prev + 1);
+          } else if (payload.eventType === 'UPDATE' || payload.eventType === 'DELETE') {
+            // Re-fetch accurate count when notifications are read/deleted
+            supabase
+              .from('notifications')
+              .select('id', { count: 'exact', head: true })
+              .eq('profile_id', user.id)
+              .is('read_at', null)
+              .then(({ count }) => setUnreadCount(count ?? 0));
+          }
+        }
+      )
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, [user]);
 
   const getActiveTab = (): BottomTab => {
     if (location.pathname === '/') return 'home';
     if (location.pathname === '/search') return 'search';
     if (location.pathname.startsWith('/communities')) return 'communities';
     if (location.pathname === '/notifications') return 'notifications';
-    if (location.pathname === '/messages') return 'profile';
-    if (location.pathname === `/${profile?.username}`) return 'profile';
+    if (profile?.username && location.pathname === `/${profile.username}`) return 'profile';
+    if (user?.id && location.pathname === `/${user.id}`) return 'profile';
     if (location.pathname === '/settings') return 'profile';
     return 'home';
   };
@@ -39,7 +88,7 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
     { key: 'search', path: '/search', OutIcon: SearchIcon, FilledIcon: SearchIcon },
     { key: 'communities', path: '/communities', OutIcon: GroupsOutlinedIcon, FilledIcon: GroupsIcon },
     { key: 'notifications', path: '/notifications', OutIcon: NotificationsOutlinedIcon, FilledIcon: NotificationsIcon },
-    { key: 'profile', path: `/${profile?.username || 'me'}`, OutIcon: PersonOutlineIcon, FilledIcon: PersonIcon },
+    { key: 'profile', path: profilePath, OutIcon: PersonOutlineIcon, FilledIcon: PersonIcon },
   ];
 
   return (
@@ -96,6 +145,9 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
           <Stack direction="row" justifyContent="space-around" alignItems="center" sx={{ height: 64 }}>
             {tabs.map(({ key, path, OutIcon, FilledIcon }) => {
               const isActive = activeTab === key;
+              const icon = isActive
+                ? <FilledIcon sx={{ fontSize: 24 }} />
+                : <OutIcon sx={{ fontSize: 24 }} />;
               return (
                 <Box
                   key={key}
@@ -112,9 +164,15 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
                     transition: 'color 150ms cubic-bezier(0.4, 0, 0.2, 1)',
                   }}
                 >
-                  {isActive
-                    ? <FilledIcon sx={{ fontSize: 24 }} />
-                    : <OutIcon sx={{ fontSize: 24 }} />}
+                  {key === 'notifications' && unreadCount > 0 ? (
+                    <Badge
+                      badgeContent={unreadCount > 99 ? '99+' : unreadCount}
+                      color="error"
+                      sx={{ '& .MuiBadge-badge': { fontSize: '0.625rem', minWidth: 16, height: 16, px: 0.5 } }}
+                    >
+                      {icon}
+                    </Badge>
+                  ) : icon}
                 </Box>
               );
             })}
