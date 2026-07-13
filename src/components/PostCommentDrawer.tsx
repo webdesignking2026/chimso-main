@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Drawer from '@mui/material/Drawer';
 import Box from '@mui/material/Box';
@@ -9,6 +9,7 @@ import TextField from '@mui/material/TextField';
 import IconButton from '@mui/material/IconButton';
 import CircularProgress from '@mui/material/CircularProgress';
 import Divider from '@mui/material/Divider';
+import Skeleton from '@mui/material/Skeleton';
 import CloseIcon from '@mui/icons-material/Close';
 import SendIcon from '@mui/icons-material/Send';
 import { supabase } from '../lib/supabase';
@@ -61,16 +62,7 @@ export default function PostCommentDrawer({ postId, open, onClose, onCommentAdde
   const [submitting, setSubmitting] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (open && postId) {
-      loadComments();
-    } else {
-      setComments([]);
-      setText('');
-    }
-  }, [open, postId]);
-
-  const loadComments = async () => {
+  const loadComments = useCallback(async () => {
     if (!postId) return;
     setLoading(true);
     const { data } = await supabase
@@ -78,25 +70,60 @@ export default function PostCommentDrawer({ postId, open, onClose, onCommentAdde
       .select('*, profiles(display_name, avatar_url, username)')
       .eq('post_id', postId)
       .is('parent_id', null)
-      .order('created_at', { ascending: true });
+      .order('created_at', { ascending: true })
+      .limit(50);
     setComments((data ?? []) as Comment[]);
     setLoading(false);
     setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
-  };
+  }, [postId]);
+
+  useEffect(() => {
+    if (open && postId) {
+      loadComments();
+    } else {
+      setComments([]);
+      setText('');
+    }
+  }, [open, postId, loadComments]);
 
   const handleSubmit = async () => {
     if (!text.trim() || !user || !postId) return;
+    const content = text.trim();
+
+    // Optimistic UI: add the comment immediately with a temp ID
+    const tempId = `temp-${Date.now()}`;
+    const optimisticComment: Comment = {
+      id: tempId,
+      content,
+      created_at: new Date().toISOString(),
+      profile_id: user.id,
+      profiles: {
+        display_name: profile?.display_name ?? '',
+        avatar_url: profile?.avatar_url ?? '',
+        username: profile?.username ?? null,
+      },
+    };
+    setComments((prev) => [...prev, optimisticComment]);
+    setText('');
     setSubmitting(true);
+    setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
+
     const { data, error } = await supabase
       .from('comments')
-      .insert({ post_id: postId, profile_id: user.id, content: text.trim() })
+      .insert({ post_id: postId, profile_id: user.id, content })
       .select('*, profiles(display_name, avatar_url, username)')
       .single();
+
     if (!error && data) {
-      setComments((prev) => [...prev, data as Comment]);
-      setText('');
+      // Replace the optimistic comment with the real one from the server
+      setComments((prev) =>
+        prev.map((c) => (c.id === tempId ? (data as Comment) : c))
+      );
       onCommentAdded(postId);
-      setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
+    } else {
+      // Roll back the optimistic comment on failure
+      setComments((prev) => prev.filter((c) => c.id !== tempId));
+      setText(content);
     }
     setSubmitting(false);
   };
@@ -140,9 +167,24 @@ export default function PostCommentDrawer({ postId, open, onClose, onCommentAdde
       {/* Comments list */}
       <Box sx={{ flex: 1, overflowY: 'auto', px: 3, py: 2 }}>
         {loading ? (
-          <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
-            <CircularProgress size={20} thickness={2.5} />
-          </Box>
+          <Stack spacing={3}>
+            {[...Array(5)].map((_, idx) => (
+              <Box key={idx}>
+                <Stack direction="row" spacing={2}>
+                  <Skeleton variant="circular" width={36} height={36} />
+                  <Box sx={{ flex: 1 }}>
+                    <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.5 }}>
+                      <Skeleton variant="text" width={120} />
+                      <Skeleton variant="text" width={30} />
+                    </Stack>
+                    <Skeleton variant="text" width="100%" />
+                    <Skeleton variant="text" width="60%" />
+                  </Box>
+                </Stack>
+                {idx < 4 && <Divider sx={{ mt: 3 }} />}
+              </Box>
+            ))}
+          </Stack>
         ) : comments.length === 0 ? (
           <Box sx={{ textAlign: 'center', py: 6 }}>
             <Typography variant="body2" sx={{ color: 'text.secondary' }}>

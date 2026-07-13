@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Box from '@mui/material/Box';
 import Container from '@mui/material/Container';
@@ -8,17 +8,19 @@ import Avatar from '@mui/material/Avatar';
 import Divider from '@mui/material/Divider';
 import TextField from '@mui/material/TextField';
 import InputAdornment from '@mui/material/InputAdornment';
-import CircularProgress from '@mui/material/CircularProgress';
 import SearchIcon from '@mui/icons-material/Search';
 import { supabase } from '../lib/supabase';
 import type { Conversation, ConversationParticipant, ConversationMessage, Profile } from '../lib/supabase';
 import MainLayout from '../components/MainLayout';
 import { useAuth } from '../context/AuthContext';
+import { ConversationListSkeleton } from '../components/Skeletons';
 
 type ConversationWithDetails = Conversation & {
   participants: ConversationParticipant[];
   last_message?: ConversationMessage;
 };
+
+const PAGE_SIZE = 30;
 
 export default function MessagesScreen() {
   const navigate = useNavigate();
@@ -27,12 +29,7 @@ export default function MessagesScreen() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
 
-  useEffect(() => {
-    if (!user) return;
-    loadConversations();
-  }, [user]);
-
-  const loadConversations = async () => {
+  const loadConversations = useCallback(async () => {
     if (!user) return;
 
     const { data: participations } = await supabase
@@ -47,50 +44,70 @@ export default function MessagesScreen() {
 
     const conversationIds = participations.map((p) => p.conversation_id);
 
-    const { data: conversationData } = await supabase
-      .from('conversations')
-      .select('*')
-      .in('id', conversationIds)
-      .order('updated_at', { ascending: false });
+    // Fetch conversations and ALL participants in parallel (2 queries instead of N+1)
+    const [{ data: conversationData }, { data: allParticipants }] = await Promise.all([
+      supabase
+        .from('conversations')
+        .select('*')
+        .in('id', conversationIds)
+        .order('updated_at', { ascending: false })
+        .limit(PAGE_SIZE),
+      supabase
+        .from('conversation_participants')
+        .select('*, profiles(display_name, avatar_url, username)')
+        .in('conversation_id', conversationIds),
+    ]);
 
     if (!conversationData) {
       setLoading(false);
       return;
     }
 
-    // Get participants for each conversation
-    const enriched = await Promise.all(
-      conversationData.map(async (conv) => {
-        const { data: participants } = await supabase
-          .from('conversation_participants')
-          .select('*, profiles(display_name, avatar_url, username)')
-          .eq('conversation_id', conv.id);
+    // Group participants by conversation
+    const participantsByConv = new Map<string, ConversationParticipant[]>();
+    for (const p of allParticipants ?? []) {
+      const arr = participantsByConv.get(p.conversation_id) ?? [];
+      arr.push(p);
+      participantsByConv.set(p.conversation_id, arr);
+    }
 
-        const { data: messages } = await supabase
-          .from('conversation_messages')
-          .select('*, profiles(display_name, avatar_url)')
-          .eq('conversation_id', conv.id)
-          .order('created_at', { ascending: false })
-          .limit(1);
+    // Fetch last message for each conversation in a single batch query
+    const { data: recentMessages } = await supabase
+      .from('conversation_messages')
+      .select('id, conversation_id, sender_id, content, created_at, read_by, profiles(display_name, avatar_url)')
+      .in('conversation_id', conversationIds)
+      .order('created_at', { ascending: false })
+      .limit(conversationIds.length * 3);
 
-        return {
-          ...conv,
-          participants: participants ?? [],
-          last_message: messages?.[0],
-        };
-      })
-    );
+    // Keep only the latest message per conversation
+    const lastMessageByConv = new Map<string, ConversationMessage>();
+    for (const msg of recentMessages ?? []) {
+      if (!lastMessageByConv.has(msg.conversation_id)) {
+        lastMessageByConv.set(msg.conversation_id, msg as unknown as ConversationMessage);
+      }
+    }
+
+    const enriched: ConversationWithDetails[] = conversationData.map((conv) => ({
+      ...conv,
+      participants: participantsByConv.get(conv.id) ?? [],
+      last_message: lastMessageByConv.get(conv.id),
+    }));
 
     setConversations(enriched);
     setLoading(false);
-  };
+  }, [user]);
 
-  const getOtherParticipant = (conv: ConversationWithDetails): Profile | null => {
+  useEffect(() => {
+    if (!user) return;
+    loadConversations();
+  }, [user, loadConversations]);
+
+  const getOtherParticipant = useCallback((conv: ConversationWithDetails): Profile | null => {
     const other = conv.participants.find((p) => p.profile_id !== user?.id);
     return other?.profiles as Profile | null;
-  };
+  }, [user]);
 
-  const formatTime = (ts: string) => {
+  const formatTime = useCallback((ts: string) => {
     const diff = Date.now() - new Date(ts).getTime();
     const m = Math.floor(diff / 60000);
     if (m < 1) return 'now';
@@ -98,17 +115,20 @@ export default function MessagesScreen() {
     const h = Math.floor(m / 60);
     if (h < 24) return `${h}h`;
     return new Date(ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-  };
+  }, []);
 
-  const initials = (name: string) =>
-    name.split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase();
+  const initials = useCallback((name: string) =>
+    name.split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase(), []);
 
-  const filtered = conversations.filter((conv) => {
-    if (!search) return true;
-    const other = getOtherParticipant(conv);
-    return other?.display_name.toLowerCase().includes(search.toLowerCase()) ||
-           other?.username?.toLowerCase().includes(search.toLowerCase());
-  });
+  const filtered = useMemo(() => {
+    if (!search) return conversations;
+    const q = search.toLowerCase();
+    return conversations.filter((conv) => {
+      const other = getOtherParticipant(conv);
+      return other?.display_name.toLowerCase().includes(q) ||
+             other?.username?.toLowerCase().includes(q);
+    });
+  }, [conversations, search, getOtherParticipant]);
 
   return (
     <MainLayout>
@@ -147,9 +167,7 @@ export default function MessagesScreen() {
       {/* Content */}
       <Container maxWidth="sm" sx={{ py: 2 }}>
         {loading ? (
-          <Box sx={{ display: 'flex', justifyContent: 'center', py: 8 }}>
-            <CircularProgress size={20} thickness={2.5} />
-          </Box>
+          <ConversationListSkeleton />
         ) : filtered.length === 0 ? (
           <Box sx={{ textAlign: 'center', py: 8 }}>
             <Typography variant="h3" sx={{ mb: 2 }}>
@@ -164,7 +182,8 @@ export default function MessagesScreen() {
             const other = getOtherParticipant(conv);
             if (!other) return null;
             const lastMessage = conv.last_message;
-            const isUnread = !lastMessage?.read_by.includes(user?.id || '');
+            const readBy = lastMessage?.read_by ?? [];
+            const isUnread = !readBy.includes(user?.id || '');
             const senderName = lastMessage?.profiles as { display_name: string } | undefined;
             const isOwnMessage = lastMessage?.sender_id === user?.id;
 

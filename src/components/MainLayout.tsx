@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import Box from '@mui/material/Box';
 import Container from '@mui/material/Container';
@@ -25,22 +25,23 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
   const { profile, user } = useAuth();
   const [unreadCount, setUnreadCount] = useState(0);
 
-  // Profile path: prefer username, fall back to user ID so the profile page
-  // can always look up the current user even before username is set.
   const profilePath = `/${profile?.username || user?.id || 'me'}`;
+
+  const fetchUnreadCount = useCallback(async () => {
+    if (!user) return;
+    const { count } = await supabase
+      .from('notifications')
+      .select('id', { count: 'exact', head: true })
+      .eq('profile_id', user.id)
+      .is('read_at', null);
+    setUnreadCount(count ?? 0);
+  }, [user]);
 
   useEffect(() => {
     if (!user) return;
 
-    // Load initial unread count
-    supabase
-      .from('notifications')
-      .select('id', { count: 'exact', head: true })
-      .eq('profile_id', user.id)
-      .is('read_at', null)
-      .then(({ count }) => setUnreadCount(count ?? 0));
+    fetchUnreadCount();
 
-    // Subscribe to notification changes for live badge updates
     const channel = supabase
       .channel(`notifications-badge-${user.id}`)
       .on(
@@ -53,43 +54,39 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
         },
         (payload) => {
           if (payload.eventType === 'INSERT') {
-            setUnreadCount((prev) => prev + 1);
+            const newRow = payload.new as { read_at: string | null };
+            if (!newRow.read_at) {
+              setUnreadCount((prev) => prev + 1);
+            }
           } else if (payload.eventType === 'UPDATE' || payload.eventType === 'DELETE') {
-            // Re-fetch accurate count when notifications are read/deleted
-            supabase
-              .from('notifications')
-              .select('id', { count: 'exact', head: true })
-              .eq('profile_id', user.id)
-              .is('read_at', null)
-              .then(({ count }) => setUnreadCount(count ?? 0));
+            fetchUnreadCount();
           }
         }
       )
       .subscribe();
 
     return () => { supabase.removeChannel(channel); };
-  }, [user]);
+  }, [user, fetchUnreadCount]);
 
-  const getActiveTab = (): BottomTab => {
-    if (location.pathname === '/') return 'home';
-    if (location.pathname === '/search') return 'search';
-    if (location.pathname.startsWith('/communities')) return 'communities';
-    if (location.pathname === '/notifications') return 'notifications';
-    if (profile?.username && location.pathname === `/${profile.username}`) return 'profile';
-    if (user?.id && location.pathname === `/${user.id}`) return 'profile';
-    if (location.pathname === '/settings') return 'profile';
+  const activeTab = useMemo((): BottomTab => {
+    const path = location.pathname;
+    if (path === '/') return 'home';
+    if (path === '/search') return 'search';
+    if (path.startsWith('/communities')) return 'communities';
+    if (path === '/notifications') return 'notifications';
+    if (profile?.username && path === `/${profile.username}`) return 'profile';
+    if (user?.id && path === `/${user.id}`) return 'profile';
+    if (path === '/settings') return 'profile';
     return 'home';
-  };
+  }, [location.pathname, profile?.username, user?.id]);
 
-  const activeTab = getActiveTab();
-
-  const tabs: { key: BottomTab; path: string; OutIcon: typeof HomeOutlinedIcon; FilledIcon: typeof HomeIcon }[] = [
+  const tabs = useMemo(() => [
     { key: 'home', path: '/', OutIcon: HomeOutlinedIcon, FilledIcon: HomeIcon },
     { key: 'search', path: '/search', OutIcon: SearchIcon, FilledIcon: SearchIcon },
     { key: 'communities', path: '/communities', OutIcon: GroupsOutlinedIcon, FilledIcon: GroupsIcon },
     { key: 'notifications', path: '/notifications', OutIcon: NotificationsOutlinedIcon, FilledIcon: NotificationsIcon },
     { key: 'profile', path: profilePath, OutIcon: PersonOutlineIcon, FilledIcon: PersonIcon },
-  ];
+  ] as const, [profilePath]);
 
   return (
     <Box sx={{ bgcolor: 'background.default', minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>

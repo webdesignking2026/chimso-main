@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import Box from '@mui/material/Box';
 import Container from '@mui/material/Container';
@@ -8,12 +8,15 @@ import Avatar from '@mui/material/Avatar';
 import TextField from '@mui/material/TextField';
 import IconButton from '@mui/material/IconButton';
 import CircularProgress from '@mui/material/CircularProgress';
+import Skeleton from '@mui/material/Skeleton';
 import SendIcon from '@mui/icons-material/Send';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import { supabase } from '../lib/supabase';
 import type { ConversationMessage, ConversationParticipant, Profile } from '../lib/supabase';
 import MainLayout from '../components/MainLayout';
 import { useAuth } from '../context/AuthContext';
+
+const MESSAGE_PAGE_SIZE = 50;
 
 export default function ConversationScreen() {
   const { id } = useParams();
@@ -26,11 +29,46 @@ export default function ConversationScreen() {
   const [sending, setSending] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  const loadConversation = useCallback(async () => {
+    if (!id || !user) return;
+
+    // Fetch participants and messages in parallel
+    const [{ data: participantData }, { data: messageData }] = await Promise.all([
+      supabase
+        .from('conversation_participants')
+        .select('*, profiles(display_name, avatar_url, username)')
+        .eq('conversation_id', id),
+      supabase
+        .from('conversation_messages')
+        .select('*, profiles(display_name, avatar_url)')
+        .eq('conversation_id', id)
+        .order('created_at', { ascending: true })
+        .limit(MESSAGE_PAGE_SIZE),
+    ]);
+
+    setParticipants(participantData ?? []);
+    setMessages(messageData ?? []);
+
+    // Mark as read
+    if (messageData && messageData.length > 0) {
+      const lastMessage = messageData[messageData.length - 1];
+      const readBy = lastMessage.read_by ?? [];
+      if (!readBy.includes(user.id)) {
+        await supabase
+          .from('conversation_messages')
+          .update({ read_by: [...readBy, user.id] })
+          .eq('id', lastMessage.id);
+      }
+    }
+
+    setLoading(false);
+  }, [id, user]);
+
   useEffect(() => {
     if (!id || !user) return;
     loadConversation();
 
-    // Subscribe to new messages
+    // Subscribe to new messages — append instead of refetching
     const channel = supabase
       .channel(`conversation:${id}`)
       .on(
@@ -41,69 +79,77 @@ export default function ConversationScreen() {
           table: 'conversation_messages',
           filter: `conversation_id=eq.${id}`,
         },
-        () => loadConversation()
+        async (payload) => {
+          const newMsg = payload.new as ConversationMessage;
+          // Skip if it's our own message (already added optimistically)
+          if (newMsg.sender_id === user.id) return;
+
+          // Fetch the profile for this message sender
+          const { data: profileData } = await supabase
+            .from('profiles')
+            .select('display_name, avatar_url')
+            .eq('id', newMsg.sender_id)
+            .maybeSingle();
+
+          setMessages((prev) => {
+            if (prev.some((m) => m.id === newMsg.id)) return prev;
+            return [...prev, { ...newMsg, profiles: profileData as unknown as Profile }];
+          });
+
+          // Mark as read
+          const readBy = newMsg.read_by ?? [];
+          if (!readBy.includes(user.id)) {
+            await supabase
+              .from('conversation_messages')
+              .update({ read_by: [...readBy, user.id] })
+              .eq('id', newMsg.id);
+          }
+        },
       )
       .subscribe();
 
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [id, user]);
+  }, [id, user, loadConversation]);
 
   useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
-
-  const loadConversation = async () => {
-    if (!id || !user) return;
-
-    const { data: participantData } = await supabase
-      .from('conversation_participants')
-      .select('*, profiles(display_name, avatar_url, username)')
-      .eq('conversation_id', id);
-
-    setParticipants(participantData ?? []);
-
-    const { data: messageData } = await supabase
-      .from('conversation_messages')
-      .select('*, profiles(display_name, avatar_url)')
-      .eq('conversation_id', id)
-      .order('created_at', { ascending: true });
-
-    setMessages(messageData ?? []);
-
-    // Mark as read
-    if (messageData && messageData.length > 0) {
-      const lastMessage = messageData[messageData.length - 1];
-      if (!lastMessage.read_by.includes(user.id)) {
-        await supabase
-          .from('conversation_messages')
-          .update({ read_by: [...lastMessage.read_by, user.id] })
-          .eq('id', lastMessage.id);
-      }
-    }
-
-    setLoading(false);
-  };
-
-  const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
+  }, [messages]);
 
   const handleSend = async () => {
     if (!message.trim() || !id || !user || sending) return;
     setSending(true);
+    const content = message.trim();
+    setMessage('');
 
-    await supabase.from('conversation_messages').insert({
+    // Optimistic: add message immediately
+    const tempId = `temp-${Date.now()}`;
+    const optimisticMsg = {
+      id: tempId,
       conversation_id: id,
       sender_id: user.id,
-      content: message.trim(),
+      content,
+      created_at: new Date().toISOString(),
       read_by: [user.id],
-    });
+      profiles: { display_name: '', avatar_url: '' },
+    } as unknown as ConversationMessage;
+    setMessages((prev) => [...prev, optimisticMsg]);
 
-    setMessage('');
+    const { data, error } = await supabase.from('conversation_messages').insert({
+      conversation_id: id,
+      sender_id: user.id,
+      content,
+      read_by: [user.id],
+    }).select('*, profiles(display_name, avatar_url)').single();
+
+    if (error) {
+      setMessages((prev) => prev.filter((m) => m.id !== tempId));
+      setMessage(content);
+    } else if (data) {
+      setMessages((prev) => prev.map((m) => (m.id === tempId ? data as ConversationMessage : m)));
+    }
     setSending(false);
-    await loadConversation();
   };
 
   const getOtherParticipant = (): Profile | null => {
@@ -124,9 +170,27 @@ export default function ConversationScreen() {
   if (loading) {
     return (
       <MainLayout>
-        <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh' }}>
-          <CircularProgress size={20} thickness={2.5} />
+        <Box sx={{ borderBottom: '1px solid', borderColor: 'divider', position: 'sticky', top: 0, bgcolor: 'background.default', zIndex: 100 }}>
+          <Container maxWidth="sm">
+            <Stack direction="row" alignItems="center" spacing={2} sx={{ py: 2 }}>
+              <IconButton onClick={() => navigate('/messages')}>
+                <ArrowBackIcon />
+              </IconButton>
+              <Skeleton variant="circular" width={36} height={36} />
+              <Skeleton variant="text" width={120} height={24} />
+            </Stack>
+          </Container>
         </Box>
+        <Container maxWidth="sm" sx={{ py: 2 }}>
+          <Stack spacing={2}>
+            {Array.from({ length: 6 }).map((_, i) => (
+              <Stack key={i} direction={i % 2 === 0 ? 'row-reverse' : 'row'} spacing={1} alignItems="flex-end">
+                {i % 2 === 0 && <Skeleton variant="circular" width={28} height={28} />}
+                <Skeleton variant="rounded" width="60%" height={40} sx={{ borderRadius: 2 }} />
+              </Stack>
+            ))}
+          </Stack>
+        </Container>
       </MainLayout>
     );
   }

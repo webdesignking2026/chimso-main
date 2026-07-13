@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import Box from '@mui/material/Box';
 import Container from '@mui/material/Container';
@@ -7,44 +7,39 @@ import Stack from '@mui/material/Stack';
 import Avatar from '@mui/material/Avatar';
 import Button from '@mui/material/Button';
 import Divider from '@mui/material/Divider';
-import CircularProgress from '@mui/material/CircularProgress';
 import Tabs from '@mui/material/Tabs';
 import Tab from '@mui/material/Tab';
 import IconButton from '@mui/material/IconButton';
-import ImageList from '@mui/material/ImageList';
-import ImageListItem from '@mui/material/ImageListItem';
 import Menu from '@mui/material/Menu';
 import MenuItem from '@mui/material/MenuItem';
 import Snackbar from '@mui/material/Snackbar';
 import SettingsIcon from '@mui/icons-material/Settings';
-import ChatBubbleOutlineIcon from '@mui/icons-material/ChatBubbleOutline';
-import FavoriteBorderIcon from '@mui/icons-material/FavoriteBorder';
-import FavoriteIcon from '@mui/icons-material/Favorite';
-import BookmarkBorderIcon from '@mui/icons-material/BookmarkBorder';
-import BookmarkIcon from '@mui/icons-material/Bookmark';
-import ShareIcon from '@mui/icons-material/Share';
 import MilitaryTechIcon from '@mui/icons-material/MilitaryTech';
 import PhotoCameraIcon from '@mui/icons-material/PhotoCamera';
-import MoreHorizIcon from '@mui/icons-material/MoreHoriz';
+import CircularProgress from '@mui/material/CircularProgress';
 import { supabase } from '../lib/supabase';
 import type { Profile, Post, ProfileBadge } from '../lib/supabase';
 import MainLayout from '../components/MainLayout';
 import { useAuth } from '../context/AuthContext';
 import PostCommentDrawer from '../components/PostCommentDrawer';
 import EditPostDialog from '../components/EditPostDialog';
+import PostCard, { type FeedPost, initials } from '../components/PostCard';
+import { DetailSkeleton } from '../components/Skeletons';
 
 type ProfileWithExtras = Profile & {
   badges?: ProfileBadge[];
   is_following?: boolean;
 };
 
+const POST_PAGE_SIZE = 20;
+
 export default function ProfileScreen() {
   const { username } = useParams();
   const navigate = useNavigate();
   const { user, refreshProfile } = useAuth();
   const [profile, setProfile] = useState<ProfileWithExtras | null>(null);
-  const [posts, setPosts] = useState<Post[]>([]);
-  const [savedPosts, setSavedPosts] = useState<Post[]>([]);
+  const [posts, setPosts] = useState<FeedPost[]>([]);
+  const [savedPosts, setSavedPosts] = useState<FeedPost[]>([]);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState(0);
   const [following, setFollowing] = useState(false);
@@ -55,21 +50,72 @@ export default function ProfileScreen() {
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
   const [menuPost, setMenuPost] = useState<string>('');
   const [editDialogOpen, setEditDialogOpen] = useState(false);
-  const [editingPost, setEditingPost] = useState<Post | null>(null);
+  const [editingPost, setEditingPost] = useState<FeedPost | null>(null);
   const [snackbar, setSnackbar] = useState('');
-  const coverInputRef = useRef<HTMLInputElement>(null);
+
+  const loadProfile = useCallback(async () => {
+    if (!username || !user) return;
+    setLoading(true);
+
+    // Step 1: Fetch profile first (needed for subsequent queries)
+    const { data: profileData } = await supabase
+      .from('profiles')
+      .select('*')
+      .or(`username.eq.${username},id.eq.${username}`)
+      .maybeSingle();
+
+    if (!profileData) {
+      setProfile(null);
+      setLoading(false);
+      return;
+    }
+
+    // Step 2: Fetch follow status, posts, and interaction state in parallel
+    const [{ data: followData }, { data: postsData }] = await Promise.all([
+      supabase
+        .from('follows')
+        .select('follower_id')
+        .eq('follower_id', user.id)
+        .eq('following_id', profileData.id)
+        .maybeSingle(),
+      supabase
+        .from('posts')
+        .select('*, niches(*), profiles!posts_profile_id_fkey(display_name, avatar_url, username)')
+        .eq('profile_id', profileData.id)
+        .order('created_at', { ascending: false })
+        .limit(POST_PAGE_SIZE),
+    ]);
+
+    const loadedPosts = (postsData ?? []) as FeedPost[];
+    setProfile({ ...profileData, is_following: !!followData } as ProfileWithExtras);
+    setFollowing(!!followData);
+    setPosts(loadedPosts);
+
+    // Step 3: Fetch interaction state in parallel with rendering (non-blocking)
+    if (loadedPosts.length > 0) {
+      const ids = loadedPosts.map((p) => p.id);
+      const [{ data: likesData }, { data: bookmarksData }] = await Promise.all([
+        supabase.from('likes').select('post_id').eq('profile_id', user.id).in('post_id', ids),
+        supabase.from('bookmarks').select('post_id').eq('profile_id', user.id).in('post_id', ids),
+      ]);
+      setLiked(new Set((likesData ?? []).map((l) => l.post_id as string)));
+      setBookmarked(new Set((bookmarksData ?? []).map((b) => b.post_id as string)));
+    }
+
+    setLoading(false);
+  }, [username, user]);
 
   useEffect(() => {
     loadProfile();
-  }, [username, user]);
+  }, [loadProfile]);
 
   useEffect(() => {
     if (tab === 3 && profile && user && profile.id === user.id && savedPosts.length === 0) {
       loadSavedPosts();
     }
-  }, [tab]);
+  }, [tab, profile, user, savedPosts.length]);
 
-  // Real-time subscription: keep follower/following counts in sync with the DB
+  // Real-time subscription: keep follower/following counts in sync
   useEffect(() => {
     if (!profile?.id) return;
 
@@ -102,70 +148,20 @@ export default function ProfileScreen() {
     return () => { supabase.removeChannel(channel); };
   }, [profile?.id]);
 
-  const loadProfile = async () => {
-    if (!username || !user) return;
-    setLoading(true);
-
-    const { data: profileData } = await supabase
-      .from('profiles')
-      .select('*')
-      .or(`username.eq.${username},id.eq.${username}`)
-      .maybeSingle();
-
-    if (!profileData) {
-      setProfile(null);
-      setLoading(false);
-      return;
-    }
-
-    const { data: followData } = await supabase
-      .from('follows')
-      .select('*')
-      .eq('follower_id', user.id)
-      .eq('following_id', profileData.id)
-      .maybeSingle();
-
-    setProfile({ ...profileData, is_following: !!followData } as ProfileWithExtras);
-    setFollowing(!!followData);
-
-    const { data: postsData } = await supabase
-      .from('posts')
-      .select('*, niches(name)')
-      .eq('profile_id', profileData.id)
-      .order('created_at', { ascending: false })
-      .limit(50);
-
-    const loadedPosts = (postsData ?? []) as Post[];
-    setPosts(loadedPosts);
-
-    if (loadedPosts.length > 0) {
-      const ids = loadedPosts.map((p) => p.id);
-      const [{ data: likesData }, { data: bookmarksData }] = await Promise.all([
-        supabase.from('likes').select('post_id').eq('profile_id', user.id).in('post_id', ids),
-        supabase.from('bookmarks').select('post_id').eq('profile_id', user.id).in('post_id', ids),
-      ]);
-      setLiked(new Set((likesData ?? []).map((l) => l.post_id as string)));
-      setBookmarked(new Set((bookmarksData ?? []).map((b) => b.post_id as string)));
-    }
-
-    setLoading(false);
-  };
-
-  const loadSavedPosts = async () => {
+  const loadSavedPosts = useCallback(async () => {
     if (!user) return;
     const { data } = await supabase
       .from('bookmarks')
-      .select('post_id, posts(*, niches(name))')
+      .select('post_id, posts(*, niches(*), profiles!posts_profile_id_fkey(display_name, avatar_url, username))')
       .eq('profile_id', user.id)
       .order('created_at', { ascending: false })
-      .limit(50);
+      .limit(POST_PAGE_SIZE);
 
     const loaded = (data ?? [])
-      .map((b) => b.posts as unknown as Post | null)
-      .filter(Boolean) as Post[];
+      .map((b) => (b as unknown as { posts: FeedPost | null }).posts)
+      .filter(Boolean) as FeedPost[];
     setSavedPosts(loaded);
 
-    // Load interaction state for saved posts too
     if (loaded.length > 0) {
       const ids = loaded.map((p) => p.id);
       const [{ data: likesData }, { data: bookmarksData }] = await Promise.all([
@@ -175,30 +171,35 @@ export default function ProfileScreen() {
       setLiked((prev) => new Set([...prev, ...(likesData ?? []).map((l) => l.post_id as string)]));
       setBookmarked((prev) => new Set([...prev, ...(bookmarksData ?? []).map((b) => b.post_id as string)]));
     }
-  };
+  }, [user]);
 
-  const handleFollow = async () => {
+  const handleFollow = useCallback(async () => {
     if (!profile || !user) return;
     if (following) {
-      // Optimistic update
       setFollowing(false);
       setProfile((prev) =>
         prev ? { ...prev, follower_count: Math.max(0, (prev.follower_count || 0) - 1) } : null
       );
-      await supabase.from('follows').delete().match({ follower_id: user.id, following_id: profile.id });
+      const { error } = await supabase.from('follows').delete().match({ follower_id: user.id, following_id: profile.id });
+      if (error) {
+        setFollowing(true);
+        setProfile((prev) => prev ? { ...prev, follower_count: (prev.follower_count || 0) + 1 } : null);
+      }
     } else {
-      // Optimistic update
       setFollowing(true);
       setProfile((prev) =>
         prev ? { ...prev, follower_count: (prev.follower_count || 0) + 1 } : null
       );
-      await supabase.from('follows').insert({ follower_id: user.id, following_id: profile.id });
+      const { error } = await supabase.from('follows').insert({ follower_id: user.id, following_id: profile.id });
+      if (error) {
+        setFollowing(false);
+        setProfile((prev) => prev ? { ...prev, follower_count: Math.max(0, (prev.follower_count || 0) - 1) } : null);
+      }
     }
-    // Refresh the auth context profile so the current user's following_count updates everywhere
     refreshProfile();
-  };
+  }, [profile, user, following, refreshProfile]);
 
-  const handleCoverUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleCoverUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !user || !profile) return;
 
@@ -206,23 +207,25 @@ export default function ProfileScreen() {
     const fileExt = file.name.split('.').pop();
     const fileName = `${user.id}/cover-${Date.now()}.${fileExt}`;
 
-    const { error: uploadError } = await supabase.storage
-      .from('covers')
-      .upload(fileName, file);
+    const { error: uploadError } = await supabase.storage.from('covers').upload(fileName, file);
 
     if (!uploadError) {
-      const { data: { publicUrl } } = supabase.storage
-        .from('covers')
-        .getPublicUrl(fileName);
-      await supabase.from('profiles').update({ cover_url: publicUrl }).eq('id', user.id);
-      setProfile((prev) => prev ? { ...prev, cover_url: publicUrl } : null);
+      const { data: { publicUrl } } = supabase.storage.from('covers').getPublicUrl(fileName);
+      const { error: updateError } = await supabase.from('profiles').update({ cover_url: publicUrl }).eq('id', user.id);
+      if (!updateError) {
+        setProfile((prev) => prev ? { ...prev, cover_url: publicUrl } : null);
+      } else {
+        setSnackbar('Failed to update cover.');
+      }
+    } else {
+      setSnackbar('Failed to upload cover.');
     }
 
     setUploadingCover(false);
-    if (coverInputRef.current) coverInputRef.current.value = '';
-  };
+    if (e.target) e.target.value = '';
+  }, [user, profile]);
 
-  const toggleLike = async (postId: string) => {
+  const toggleLike = useCallback(async (postId: string) => {
     if (!user) return;
     const isLiked = liked.has(postId);
 
@@ -231,7 +234,7 @@ export default function ProfileScreen() {
       isLiked ? n.delete(postId) : n.add(postId);
       return n;
     });
-    const updateCount = (arr: Post[]) =>
+    const updateCount = (arr: FeedPost[]) =>
       arr.map((p) =>
         p.id === postId
           ? { ...p, like_count: Math.max(0, (p.like_count || 0) + (isLiked ? -1 : 1)) }
@@ -241,13 +244,21 @@ export default function ProfileScreen() {
     setSavedPosts(updateCount);
 
     if (isLiked) {
-      await supabase.from('likes').delete().match({ profile_id: user.id, post_id: postId });
+      const { error } = await supabase.from('likes').delete().match({ profile_id: user.id, post_id: postId });
+      if (error) {
+        setLiked((prev) => { const n = new Set(prev); n.add(postId); return n; });
+        setPosts((prev) => prev.map((p) => (p.id === postId ? { ...p, like_count: (p.like_count || 0) + 1 } : p)));
+      }
     } else {
-      await supabase.from('likes').insert({ profile_id: user.id, post_id: postId });
+      const { error } = await supabase.from('likes').insert({ profile_id: user.id, post_id: postId });
+      if (error) {
+        setLiked((prev) => { const n = new Set(prev); n.delete(postId); return n; });
+        setPosts((prev) => prev.map((p) => (p.id === postId ? { ...p, like_count: Math.max(0, (p.like_count || 0) - 1) } : p)));
+      }
     }
-  };
+  }, [user, liked]);
 
-  const toggleBookmark = async (postId: string) => {
+  const toggleBookmark = useCallback(async (postId: string) => {
     if (!user) return;
     const isBookmarked = bookmarked.has(postId);
 
@@ -258,22 +269,29 @@ export default function ProfileScreen() {
     });
 
     if (isBookmarked) {
-      await supabase.from('bookmarks').delete().match({ profile_id: user.id, post_id: postId });
-      setSavedPosts((prev) => prev.filter((p) => p.id !== postId));
+      const { error } = await supabase.from('bookmarks').delete().match({ profile_id: user.id, post_id: postId });
+      if (!error) {
+        setSavedPosts((prev) => prev.filter((p) => p.id !== postId));
+      } else {
+        setBookmarked((prev) => { const n = new Set(prev); n.add(postId); return n; });
+      }
     } else {
-      await supabase.from('bookmarks').insert({ profile_id: user.id, post_id: postId });
+      const { error } = await supabase.from('bookmarks').insert({ profile_id: user.id, post_id: postId });
+      if (error) {
+        setBookmarked((prev) => { const n = new Set(prev); n.delete(postId); return n; });
+      }
     }
-  };
+  }, [user, bookmarked]);
 
-  const handleOpenEdit = () => {
+  const handleOpenEdit = useCallback(() => {
     const post = posts.find((p) => p.id === menuPost) ?? savedPosts.find((p) => p.id === menuPost) ?? null;
     setEditingPost(post);
     setEditDialogOpen(true);
     setAnchorEl(null);
-  };
+  }, [posts, savedPosts, menuPost]);
 
-  const handleEditSaved = (updated: Partial<Post>) => {
-    const apply = (arr: Post[]) =>
+  const handleEditSaved = useCallback((updated: Partial<Post>) => {
+    const apply = (arr: FeedPost[]) =>
       arr.map((p) =>
         p.id === updated.id
           ? { ...p, content: updated.content ?? p.content, image_urls: updated.image_urls ?? p.image_urls, updated_at: updated.updated_at ?? p.updated_at }
@@ -282,17 +300,21 @@ export default function ProfileScreen() {
     setPosts(apply);
     setSavedPosts(apply);
     setSnackbar('Post updated.');
-  };
+  }, []);
 
-  const handleDeletePost = async (postId: string) => {
+  const handleDeletePost = useCallback(async (postId: string) => {
     setAnchorEl(null);
-    await supabase.from('posts').delete().eq('id', postId);
-    setPosts((prev) => prev.filter((p) => p.id !== postId));
-    setSavedPosts((prev) => prev.filter((p) => p.id !== postId));
-    setSnackbar('Post deleted.');
-  };
+    const { error } = await supabase.from('posts').delete().eq('id', postId);
+    if (!error) {
+      setPosts((prev) => prev.filter((p) => p.id !== postId));
+      setSavedPosts((prev) => prev.filter((p) => p.id !== postId));
+      setSnackbar('Post deleted.');
+    } else {
+      setSnackbar('Failed to delete post.');
+    }
+  }, []);
 
-  const handleShare = async (post: Post) => {
+  const handleShare = useCallback(async (post: FeedPost) => {
     if (!profile) return;
     const url = `${window.location.origin}/post/${post.id}`;
     const shareData = {
@@ -300,154 +322,65 @@ export default function ProfileScreen() {
       text: post.content.slice(0, 100),
       url,
     };
-    const updateCount = (arr: Post[]) =>
+    const updateCount = (arr: FeedPost[]) =>
       arr.map((p) => (p.id === post.id ? { ...p, share_count: (p.share_count || 0) + 1 } : p));
     setPosts(updateCount);
     setSavedPosts(updateCount);
-    await supabase.rpc('increment_post_share_count', { post_id: post.id });
+    const { error } = await supabase.rpc('increment_post_share_count', { post_id: post.id });
+    if (error) {
+      const revert = (arr: FeedPost[]) =>
+        arr.map((p) => (p.id === post.id ? { ...p, share_count: Math.max(0, (p.share_count || 0) - 1) } : p));
+      setPosts(revert);
+      setSavedPosts(revert);
+    }
 
     if (navigator.share && navigator.canShare?.(shareData)) {
       await navigator.share(shareData).catch(() => {});
     } else {
       await navigator.clipboard.writeText(url).catch(() => {});
+      setSnackbar('Link copied to clipboard!');
     }
-  };
+  }, [profile]);
 
-  const handleCommentAdded = (postId: string) => {
-    const updateCount = (arr: Post[]) =>
+  const handleCommentAdded = useCallback((postId: string) => {
+    const updateCount = (arr: FeedPost[]) =>
       arr.map((p) =>
         p.id === postId ? { ...p, comment_count: (p.comment_count || 0) + 1 } : p
       );
     setPosts(updateCount);
     setSavedPosts(updateCount);
-  };
+  }, []);
 
-  const formatTime = (ts: string) => {
-    const diff = Date.now() - new Date(ts).getTime();
-    const m = Math.floor(diff / 60000);
-    if (m < 1) return 'just now';
-    if (m < 60) return `${m}m`;
-    const h = Math.floor(m / 60);
-    if (h < 24) return `${h}h`;
-    return `${Math.floor(h / 24)}d`;
-  };
+  const handleMenu = useCallback((e: React.MouseEvent<HTMLElement>, postId: string) => {
+    setAnchorEl(e.currentTarget);
+    setMenuPost(postId);
+  }, []);
 
-  const initials = (name: string) =>
-    name.split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase();
+  const handleComment = useCallback((postId: string) => {
+    setCommentDrawerPostId(postId);
+  }, []);
+
+  const postCardProps = useMemo(() => ({
+    onLike: toggleLike,
+    onBookmark: toggleBookmark,
+    onShare: handleShare,
+    onComment: handleComment,
+    onMenu: handleMenu,
+  }), [toggleLike, toggleBookmark, handleShare, handleComment, handleMenu]);
 
   const isOwnProfile = profile?.id === user?.id;
-
-  const getPostImages = (post: Post): string[] => {
-    if (post.image_urls && post.image_urls.length > 0) return post.image_urls;
-    if (post.image_url) return [post.image_url];
-    return [];
-  };
-
-  const renderPostCard = (post: Post, idx: number, arr: Post[]) => {
-    const isLiked = liked.has(post.id);
-    const isBookmarked = bookmarked.has(post.id);
-    const images = getPostImages(post);
-    const isOwnPost = post.profile_id === user?.id;
-
-    return (
-      <Box key={post.id}>
-        <Box sx={{ py: 3, position: 'relative' }}>
-          {isOwnPost && (
-            <IconButton
-              size="small"
-              sx={{ color: 'text.secondary', position: 'absolute', top: 16, right: -8 }}
-              onClick={(e) => { setAnchorEl(e.currentTarget); setMenuPost(post.id); }}
-            >
-              <MoreHorizIcon sx={{ fontSize: 18 }} />
-            </IconButton>
-          )}
-          <Typography variant="body1" sx={{ wordBreak: 'break-word', whiteSpace: 'pre-wrap', pr: isOwnPost ? 4 : 0 }}>{post.content}</Typography>
-
-          {images.length > 0 && (
-            <Box sx={{ mt: 2, borderRadius: 2, overflow: 'hidden' }}>
-              <ImageList cols={images.length > 1 ? 2 : 1} gap={4} sx={{ m: 0 }}>
-                {images.slice(0, 4).map((url, imgIdx) => (
-                  <ImageListItem key={imgIdx}>
-                    <Box
-                      component="img"
-                      src={url}
-                      alt={`Post image ${imgIdx + 1}`}
-                      sx={{
-                        width: '100%',
-                        height: images.length === 1 ? 280 : 160,
-                        objectFit: 'cover',
-                      }}
-                    />
-                  </ImageListItem>
-                ))}
-              </ImageList>
-            </Box>
-          )}
-
-          <Stack direction="row" spacing={0} sx={{ mt: 2, ml: -1 }}>
-            <Stack direction="row" alignItems="center">
-              <IconButton
-                size="small"
-                onClick={() => setCommentDrawerPostId(post.id)}
-                sx={{ color: 'text.secondary', '&:hover': { color: 'primary.main' } }}
-              >
-                <ChatBubbleOutlineIcon sx={{ fontSize: 17 }} />
-              </IconButton>
-              <Typography variant="caption" sx={{ color: 'text.secondary', minWidth: 16 }}>
-                {post.comment_count || 0}
-              </Typography>
-            </Stack>
-
-            <Stack direction="row" alignItems="center" sx={{ ml: 2 }}>
-              <IconButton
-                size="small"
-                onClick={() => toggleLike(post.id)}
-                sx={{ color: isLiked ? 'error.main' : 'text.secondary', '&:hover': { color: 'error.main' } }}
-              >
-                {isLiked ? <FavoriteIcon sx={{ fontSize: 17 }} /> : <FavoriteBorderIcon sx={{ fontSize: 17 }} />}
-              </IconButton>
-              <Typography variant="caption" sx={{ color: isLiked ? 'error.main' : 'text.secondary', minWidth: 16 }}>
-                {post.like_count || 0}
-              </Typography>
-            </Stack>
-
-            <Stack direction="row" alignItems="center" sx={{ ml: 2 }}>
-              <IconButton
-                size="small"
-                onClick={() => toggleBookmark(post.id)}
-                sx={{ color: isBookmarked ? 'primary.main' : 'text.secondary', '&:hover': { color: 'primary.main' } }}
-              >
-                {isBookmarked ? <BookmarkIcon sx={{ fontSize: 17 }} /> : <BookmarkBorderIcon sx={{ fontSize: 17 }} />}
-              </IconButton>
-            </Stack>
-
-            <IconButton
-              size="small"
-              onClick={() => handleShare(post)}
-              sx={{ ml: 2, color: 'text.secondary', '&:hover': { color: 'primary.main' } }}
-            >
-              <ShareIcon sx={{ fontSize: 17 }} />
-            </IconButton>
-          </Stack>
-
-          <Typography variant="caption" sx={{ color: 'text.secondary', mt: 1, display: 'block' }}>
-            {formatTime(post.created_at)} in {(post.niches as { name: string } | null)?.name || 'general'}
-            {post.updated_at && new Date(post.updated_at).getTime() - new Date(post.created_at).getTime() > 5000 && (
-              <Box component="span" sx={{ color: 'text.disabled' }}> · Edited</Box>
-            )}
-          </Typography>
-        </Box>
-        {idx < arr.length - 1 && <Divider />}
-      </Box>
-    );
-  };
 
   if (loading) {
     return (
       <MainLayout>
-        <Box sx={{ display: 'flex', justifyContent: 'center', py: 12 }}>
-          <CircularProgress size={20} thickness={2.5} />
+        <Box sx={{ position: 'relative', height: 180, bgcolor: 'grey.200' }}>
+          <Box sx={{ position: 'absolute', bottom: -40, left: '50%', transform: 'translateX(-50%)' }}>
+            <Avatar sx={{ width: 80, height: 80, border: '4px solid', borderColor: 'background.default', bgcolor: 'grey.300' }} />
+          </Box>
         </Box>
+        <Container maxWidth="sm" sx={{ mt: 6 }}>
+          <DetailSkeleton />
+        </Container>
       </MainLayout>
     );
   }
@@ -503,12 +436,12 @@ export default function ProfileScreen() {
             <input
               type="file"
               accept="image/*"
-              ref={coverInputRef}
               onChange={handleCoverUpload}
               style={{ display: 'none' }}
+              id="cover-upload-input"
             />
             <IconButton
-              onClick={() => coverInputRef.current?.click()}
+              onClick={() => document.getElementById('cover-upload-input')?.click()}
               disabled={uploadingCover}
               sx={{
                 position: 'absolute',
@@ -625,7 +558,17 @@ export default function ProfileScreen() {
                 <Typography variant="body1" sx={{ color: 'text.secondary' }}>No posts yet</Typography>
               </Box>
             ) : (
-              posts.map((post, idx) => renderPostCard(post, idx, posts))
+              posts.map((post) => (
+                <PostCard
+                  key={post.id}
+                  post={post}
+                  isLiked={liked.has(post.id)}
+                  isBookmarked={bookmarked.has(post.id)}
+                  isOwn={post.profile_id === user?.id}
+                  showDivider={true}
+                  {...postCardProps}
+                />
+              ))
             )}
           </Box>
         )}
@@ -652,7 +595,17 @@ export default function ProfileScreen() {
                 </Typography>
               </Box>
             ) : (
-              savedPosts.map((post, idx) => renderPostCard(post, idx, savedPosts))
+              savedPosts.map((post) => (
+                <PostCard
+                  key={post.id}
+                  post={post}
+                  isLiked={liked.has(post.id)}
+                  isBookmarked={bookmarked.has(post.id)}
+                  isOwn={post.profile_id === user?.id}
+                  showDivider={true}
+                  {...postCardProps}
+                />
+              ))
             )}
           </Box>
         )}

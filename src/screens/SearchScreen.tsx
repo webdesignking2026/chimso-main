@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Box from '@mui/material/Box';
 import Container from '@mui/material/Container';
@@ -17,6 +17,7 @@ import ArticleIcon from '@mui/icons-material/Article';
 import { supabase } from '../lib/supabase';
 import type { Profile, Community, Post } from '../lib/supabase';
 import MainLayout from '../components/MainLayout';
+import { ListSkeleton } from '../components/Skeletons';
 
 type SearchResult = {
   profiles: Profile[];
@@ -24,66 +25,104 @@ type SearchResult = {
   posts: Post[];
 };
 
+const EMPTY_RESULTS: SearchResult = { profiles: [], communities: [], posts: [] };
+
+// Columns selected for each table (only what the UI needs)
+const PROFILE_COLUMNS = 'id, display_name, avatar_url, username';
+const COMMUNITY_COLUMNS = 'id, name, slug, description, icon_url, member_count, is_private';
+const POST_COLUMNS =
+  'id, content, created_at, profiles!posts_profile_id_fkey(display_name, avatar_url, username), niches(name)';
+
+// Sanitize a user query for safe interpolation into a PostgREST .or() filter
+// string. Strips characters that have structural meaning in PostgREST filters
+// (commas separate clauses, parentheses group, dots separate column.operator),
+// and escapes the rest so the value cannot break out of the ilike argument.
+function sanitizeForOrFilter(value: string): string {
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/,/g, '')
+    .replace(/\(/g, '')
+    .replace(/\)/g, '')
+    .replace(/\./g, ' ')
+    .trim();
+}
+
 export default function SearchScreen() {
   const navigate = useNavigate();
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
-  const [results, setResults] = useState<SearchResult>({ profiles: [], communities: [], posts: [] });
+  const [results, setResults] = useState<SearchResult>(EMPTY_RESULTS);
   const [trendingCommunities, setTrendingCommunities] = useState<Community[]>([]);
 
   useEffect(() => {
-    // Load trending communities
+    // Load trending communities (only the columns the UI renders)
     supabase
       .from('communities')
-      .select('*')
+      .select(COMMUNITY_COLUMNS)
       .eq('is_private', false)
       .order('member_count', { ascending: false })
       .limit(5)
       .then(({ data }) => {
-        setTrendingCommunities(data ?? []);
+        setTrendingCommunities((data as Community[]) ?? []);
       });
+  }, []);
+
+  // Memoize the search callback so it keeps a stable identity across renders
+  // (e.g. while the user types) and only depends on the current query value.
+  const runSearch = useCallback(async (searchQuery: string) => {
+    setLoading(true);
+    try {
+      const safe = sanitizeForOrFilter(searchQuery);
+      const pattern = `%${safe}%`;
+
+      // Use sanitized text inside .or() and combine with .ilike() for the
+      // single-column posts filter. Each .or() clause is built from sanitized
+      // text so a malicious query cannot inject additional filter clauses.
+      const [profilesRes, communitiesRes, postsRes] = await Promise.all([
+        supabase
+          .from('profiles')
+          .select(PROFILE_COLUMNS)
+          .or(`username.ilike.${pattern},display_name.ilike.${pattern}`)
+          .limit(10),
+        supabase
+          .from('communities')
+          .select(COMMUNITY_COLUMNS)
+          .or(`name.ilike.${pattern},description.ilike.${pattern}`)
+          .eq('is_private', false)
+          .limit(10),
+        supabase
+          .from('posts')
+          .select(POST_COLUMNS)
+          .ilike('content', `%${searchQuery}%`)
+          .limit(20),
+      ]);
+
+      setResults({
+        profiles: (profilesRes.data as Profile[]) ?? [],
+        communities: (communitiesRes.data as Community[]) ?? [],
+        posts: (postsRes.data as unknown as Post[]) ?? [],
+      });
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
     if (!query.trim()) {
-      setResults({ profiles: [], communities: [], posts: [] });
+      setResults(EMPTY_RESULTS);
       return;
     }
 
-    const searchTimer = setTimeout(async () => {
-      setLoading(true);
-      try {
-        const [profilesRes, communitiesRes, postsRes] = await Promise.all([
-          supabase
-            .from('profiles')
-            .select('*')
-            .or(`username.ilike.%${query}%,display_name.ilike.%${query}%`)
-            .limit(10),
-          supabase
-            .from('communities')
-            .select('*')
-            .or(`name.ilike.%${query}%,description.ilike.%${query}%`)
-            .eq('is_private', false)
-            .limit(10),
-          supabase
-            .from('posts')
-            .select('*, profiles!posts_profile_id_fkey(display_name, avatar_url, username), niches(name)')
-            .ilike('content', `%${query}%`)
-            .limit(20),
-        ]);
-
-        setResults({
-          profiles: profilesRes.data ?? [],
-          communities: communitiesRes.data ?? [],
-          posts: postsRes.data ?? [],
-        });
-      } finally {
-        setLoading(false);
-      }
+    const searchTimer = setTimeout(() => {
+      runSearch(query);
     }, 300);
 
     return () => clearTimeout(searchTimer);
-  }, [query]);
+  }, [query, runSearch]);
+
+  // Memoize trending communities so re-renders during search typing don't
+  // recompute the derived list.
+  const trending = useMemo(() => trendingCommunities, [trendingCommunities]);
 
   const initials = (name: string) =>
     name.split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase();
@@ -124,6 +163,12 @@ export default function SearchScreen() {
       <Container maxWidth="sm" sx={{ py: 4 }}>
         {query.trim() ? (
           <Box>
+            {/* Loading skeleton while fetching results */}
+            {loading &&
+              results.profiles.length === 0 &&
+              results.communities.length === 0 &&
+              results.posts.length === 0 && <ListSkeleton count={6} />}
+
             {/* Profiles */}
             {results.profiles.length > 0 && (
               <Box sx={{ mb: 4 }}>
@@ -252,37 +297,41 @@ export default function SearchScreen() {
                 <Typography variant="h5">Trending Communities</Typography>
               </Stack>
               <Stack spacing={2}>
-                {trendingCommunities.map((community) => (
-                  <Box
-                    key={community.id}
-                    onClick={() => navigate(`/communities/${community.slug}`)}
-                    sx={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 2,
-                      py: 2.5,
-                      px: 3,
-                      borderRadius: 2,
-                      border: '1px solid',
-                      borderColor: 'divider',
-                      cursor: 'pointer',
-                      transition: 'border-color 150ms',
-                      '&:hover': { borderColor: 'primary.main' },
-                    }}
-                  >
-                    <Avatar sx={{ width: 44, height: 44, bgcolor: 'primary.main', fontSize: '1.25rem' }}>
-                      {community.name[0]}
-                    </Avatar>
-                    <Box sx={{ flex: 1 }}>
-                      <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
-                        {community.name}
-                      </Typography>
-                      <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-                        {community.member_count} members
-                      </Typography>
+                {trending.length === 0 ? (
+                  <ListSkeleton count={5} />
+                ) : (
+                  trending.map((community) => (
+                    <Box
+                      key={community.id}
+                      onClick={() => navigate(`/communities/${community.slug}`)}
+                      sx={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 2,
+                        py: 2.5,
+                        px: 3,
+                        borderRadius: 2,
+                        border: '1px solid',
+                        borderColor: 'divider',
+                        cursor: 'pointer',
+                        transition: 'border-color 150ms',
+                        '&:hover': { borderColor: 'primary.main' },
+                      }}
+                    >
+                      <Avatar sx={{ width: 44, height: 44, bgcolor: 'primary.main', fontSize: '1.25rem' }}>
+                        {community.name[0]}
+                      </Avatar>
+                      <Box sx={{ flex: 1 }}>
+                        <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
+                          {community.name}
+                        </Typography>
+                        <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+                          {community.member_count} members
+                        </Typography>
+                      </Box>
                     </Box>
-                  </Box>
-                ))}
+                  ))
+                )}
               </Stack>
             </Box>
 

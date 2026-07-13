@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import Box from '@mui/material/Box';
 import Container from '@mui/material/Container';
@@ -6,7 +6,6 @@ import Typography from '@mui/material/Typography';
 import Stack from '@mui/material/Stack';
 import Avatar from '@mui/material/Avatar';
 import IconButton from '@mui/material/IconButton';
-import CircularProgress from '@mui/material/CircularProgress';
 import Divider from '@mui/material/Divider';
 import Chip from '@mui/material/Chip';
 import ImageList from '@mui/material/ImageList';
@@ -24,6 +23,7 @@ import type { Post, Niche } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import MainLayout from '../components/MainLayout';
 import PostCommentDrawer from '../components/PostCommentDrawer';
+import { DetailSkeleton } from '../components/Skeletons';
 
 type PostWithRelations = Post & {
   profiles: { display_name: string; avatar_url: string; username: string | null };
@@ -41,11 +41,17 @@ export default function PostDetailScreen() {
   const [commentDrawerOpen, setCommentDrawerOpen] = useState(false);
   const [snackbar, setSnackbar] = useState('');
 
-  useEffect(() => {
-    if (id) loadPost();
-  }, [id, user]);
+  const setMetaTag = useCallback((property: string, content: string) => {
+    let el = document.querySelector(`meta[property="${property}"]`) as HTMLMetaElement | null;
+    if (!el) {
+      el = document.createElement('meta');
+      el.setAttribute('property', property);
+      document.head.appendChild(el);
+    }
+    el.setAttribute('content', content);
+  }, []);
 
-  const loadPost = async () => {
+  const loadPost = useCallback(async () => {
     if (!id) return;
     setLoading(true);
 
@@ -75,7 +81,7 @@ export default function PostDetailScreen() {
       setMetaTag('twitter:image', image);
       document.title = title;
 
-      // Load interaction state
+      // Load interaction state in parallel (like + bookmark fetched together)
       if (user) {
         const [{ data: likeData }, { data: bmData }] = await Promise.all([
           supabase.from('likes').select('post_id').eq('profile_id', user.id).eq('post_id', id).maybeSingle(),
@@ -87,45 +93,63 @@ export default function PostDetailScreen() {
     }
 
     setLoading(false);
-  };
+  }, [id, user, setMetaTag]);
 
-  const setMetaTag = (property: string, content: string) => {
-    let el = document.querySelector(`meta[property="${property}"]`) as HTMLMetaElement | null;
-    if (!el) {
-      el = document.createElement('meta');
-      el.setAttribute('property', property);
-      document.head.appendChild(el);
-    }
-    el.setAttribute('content', content);
-  };
+  useEffect(() => {
+    if (id) loadPost();
+  }, [id, loadPost]);
 
-  const toggleLike = async () => {
+  const toggleLike = useCallback(async () => {
     if (!user || !post) return;
-    if (liked) {
-      setLiked(false);
-      setPost((p) => p ? { ...p, like_count: Math.max(0, (p.like_count || 0) - 1) } : p);
-      await supabase.from('likes').delete().match({ profile_id: user.id, post_id: post.id });
-    } else {
-      setLiked(true);
-      setPost((p) => p ? { ...p, like_count: (p.like_count || 0) + 1 } : p);
-      await supabase.from('likes').insert({ profile_id: user.id, post_id: post.id });
-    }
-  };
+    const prevLiked = liked;
+    const prevCount = post.like_count || 0;
 
-  const toggleBookmark = async () => {
+    // Optimistic update
+    const nextLiked = !prevLiked;
+    setLiked(nextLiked);
+    setPost((p) => p ? { ...p, like_count: Math.max(0, prevCount + (nextLiked ? 1 : -1)) } : p);
+
+    try {
+      if (prevLiked) {
+        const { error } = await supabase.from('likes').delete().match({ profile_id: user.id, post_id: post.id });
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.from('likes').insert({ profile_id: user.id, post_id: post.id });
+        if (error) throw error;
+      }
+    } catch {
+      // Revert on error
+      setLiked(prevLiked);
+      setPost((p) => p ? { ...p, like_count: prevCount } : p);
+      setSnackbar('Could not update like. Please try again.');
+    }
+  }, [user, post, liked]);
+
+  const toggleBookmark = useCallback(async () => {
     if (!user || !post) return;
-    if (bookmarked) {
-      setBookmarked(false);
-      await supabase.from('bookmarks').delete().match({ profile_id: user.id, post_id: post.id });
-      setSnackbar('Bookmark removed.');
-    } else {
-      setBookmarked(true);
-      await supabase.from('bookmarks').insert({ profile_id: user.id, post_id: post.id });
-      setSnackbar('Post saved!');
-    }
-  };
+    const prevBookmarked = bookmarked;
 
-  const handleShare = async () => {
+    // Optimistic update
+    const nextBookmarked = !prevBookmarked;
+    setBookmarked(nextBookmarked);
+    setSnackbar(nextBookmarked ? 'Post saved!' : 'Bookmark removed.');
+
+    try {
+      if (prevBookmarked) {
+        const { error } = await supabase.from('bookmarks').delete().match({ profile_id: user.id, post_id: post.id });
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.from('bookmarks').insert({ profile_id: user.id, post_id: post.id });
+        if (error) throw error;
+      }
+    } catch {
+      // Revert on error
+      setBookmarked(prevBookmarked);
+      setSnackbar('Could not update bookmark. Please try again.');
+    }
+  }, [user, post, bookmarked]);
+
+  const handleShare = useCallback(async () => {
     if (!post) return;
     const url = window.location.href;
     const shareData = {
@@ -139,28 +163,47 @@ export default function PostDetailScreen() {
       await navigator.clipboard.writeText(url).catch(() => {});
       setSnackbar('Link copied to clipboard!');
     }
-  };
+  }, [post]);
 
-  const getPostImages = (): string[] => {
+  const handleCommentAdded = useCallback(() => {
+    setPost((p) => p ? { ...p, comment_count: (p.comment_count || 0) + 1 } : p);
+  }, []);
+
+  const openCommentDrawer = useCallback(() => setCommentDrawerOpen(true), []);
+  const closeCommentDrawer = useCallback(() => setCommentDrawerOpen(false), []);
+  const closeSnackbar = useCallback(() => setSnackbar(''), []);
+  const goBack = useCallback(() => navigate(-1), [navigate]);
+
+  const getPostImages = useCallback((): string[] => {
     if (!post) return [];
     if (post.image_urls?.length > 0) return post.image_urls;
     if (post.image_url) return [post.image_url];
     return [];
-  };
+  }, [post]);
 
-  const formatTime = (ts: string) => {
+  const formatTime = useCallback((ts: string) => {
     return new Date(ts).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-  };
+  }, []);
 
-  const initials = (name: string) =>
-    name.split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase();
+  const initials = useCallback((name: string) =>
+    name.split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase(), []);
 
   if (loading) {
     return (
       <MainLayout>
-        <Box sx={{ display: 'flex', justifyContent: 'center', py: 12 }}>
-          <CircularProgress size={20} thickness={2.5} />
+        <Box sx={{ borderBottom: '1px solid', borderColor: 'divider', position: 'sticky', top: 0, bgcolor: 'rgba(255,255,255,0.92)', backdropFilter: 'blur(12px)', zIndex: 100 }}>
+          <Container maxWidth="sm">
+            <Stack direction="row" alignItems="center" spacing={2} sx={{ py: 2 }}>
+              <IconButton onClick={goBack}>
+                <ArrowBackIcon />
+              </IconButton>
+              <Typography variant="h5" sx={{ fontWeight: 700 }}>Post</Typography>
+            </Stack>
+          </Container>
         </Box>
+        <Container maxWidth="sm" sx={{ py: 4 }}>
+          <DetailSkeleton />
+        </Container>
       </MainLayout>
     );
   }
@@ -183,7 +226,7 @@ export default function PostDetailScreen() {
       <Box sx={{ borderBottom: '1px solid', borderColor: 'divider', position: 'sticky', top: 0, bgcolor: 'rgba(255,255,255,0.92)', backdropFilter: 'blur(12px)', zIndex: 100 }}>
         <Container maxWidth="sm">
           <Stack direction="row" alignItems="center" spacing={2} sx={{ py: 2 }}>
-            <IconButton onClick={() => navigate(-1)}>
+            <IconButton onClick={goBack}>
               <ArrowBackIcon />
             </IconButton>
             <Typography variant="h5" sx={{ fontWeight: 700 }}>Post</Typography>
@@ -254,7 +297,7 @@ export default function PostDetailScreen() {
         {/* Actions */}
         <Stack direction="row" spacing={1} sx={{ ml: -1 }}>
           <Stack direction="row" alignItems="center">
-            <IconButton size="small" onClick={() => setCommentDrawerOpen(true)} sx={{ color: 'text.secondary' }}>
+            <IconButton size="small" onClick={openCommentDrawer} sx={{ color: 'text.secondary' }}>
               <ChatBubbleOutlineIcon sx={{ fontSize: 20 }} />
             </IconButton>
             <Typography variant="caption" sx={{ color: 'text.secondary', minWidth: 20 }}>
@@ -284,14 +327,14 @@ export default function PostDetailScreen() {
       <PostCommentDrawer
         postId={post.id}
         open={commentDrawerOpen}
-        onClose={() => setCommentDrawerOpen(false)}
-        onCommentAdded={() => setPost((p) => p ? { ...p, comment_count: (p.comment_count || 0) + 1 } : p)}
+        onClose={closeCommentDrawer}
+        onCommentAdded={handleCommentAdded}
       />
 
       <Snackbar
         open={Boolean(snackbar)}
         autoHideDuration={3000}
-        onClose={() => setSnackbar('')}
+        onClose={closeSnackbar}
         message={snackbar}
         anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
       />

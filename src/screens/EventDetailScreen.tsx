@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import Box from '@mui/material/Box';
 import Container from '@mui/material/Container';
@@ -10,6 +10,7 @@ import Chip from '@mui/material/Chip';
 import Divider from '@mui/material/Divider';
 import CircularProgress from '@mui/material/CircularProgress';
 import IconButton from '@mui/material/IconButton';
+import Skeleton from '@mui/material/Skeleton';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import CalendarTodayIcon from '@mui/icons-material/CalendarToday';
 import LocationOnIcon from '@mui/icons-material/LocationOn';
@@ -18,7 +19,10 @@ import BookmarkBorderIcon from '@mui/icons-material/BookmarkBorder';
 import { supabase } from '../lib/supabase';
 import type { Event, Profile } from '../lib/supabase';
 import MainLayout from '../components/MainLayout';
+import { DetailSkeleton } from '../components/Skeletons';
 import { useAuth } from '../context/AuthContext';
+
+type RSVPStatus = 'going' | 'interested' | 'not_going';
 
 export default function EventDetailScreen() {
   const { id } = useParams();
@@ -27,17 +31,14 @@ export default function EventDetailScreen() {
   const [event, setEvent] = useState<Event | null>(null);
   const [creator, setCreator] = useState<Profile | null>(null);
   const [attendees, setAttendees] = useState<Profile[]>([]);
-  const [userStatus, setUserStatus] = useState<string | null>(null);
+  const [userStatus, setUserStatus] = useState<RSVPStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState(false);
 
-  useEffect(() => {
-    loadEvent();
-  }, [id, user]);
-
-  const loadEvent = async () => {
+  const loadEvent = useCallback(async () => {
     if (!id || !user) return;
 
+    // Step 1: fetch the event (with its creator profile) first.
     const { data: eventData } = await supabase
       .from('events')
       .select('*, profiles(display_name, avatar_url, username)')
@@ -46,6 +47,7 @@ export default function EventDetailScreen() {
 
     if (!eventData) {
       setEvent(null);
+      setCreator(null);
       setLoading(false);
       return;
     }
@@ -53,59 +55,94 @@ export default function EventDetailScreen() {
     setEvent(eventData as Event);
     setCreator(eventData.profiles as Profile);
 
-    // Get attendees
-    const { data: attendeeData } = await supabase
-      .from('event_attendees')
-      .select('*, profiles(display_name, avatar_url)')
-      .eq('event_id', id);
+    // Step 2: fetch attendees + user status in parallel (previously a 3-step waterfall).
+    const [attendeesRes, statusRes] = await Promise.all([
+      supabase
+        .from('event_attendees')
+        .select('event_id, profile_id, status, profiles(display_name, avatar_url)')
+        .eq('event_id', id)
+        .limit(50),
+      supabase
+        .from('event_attendees')
+        .select('status')
+        .eq('event_id', id)
+        .eq('profile_id', user.id)
+        .maybeSingle(),
+    ]);
 
-    setAttendees((attendeeData ?? []).map((a) => a.profiles as Profile));
-
-    // Check user status
-    const { data: statusData } = await supabase
-      .from('event_attendees')
-      .select('status')
-      .eq('event_id', id)
-      .eq('profile_id', user.id)
-      .maybeSingle();
-
-    setUserStatus(statusData?.status || null);
+    setAttendees((attendeesRes.data ?? []).map((a) => a.profiles as unknown as Profile));
+    setUserStatus((statusRes.data?.status as RSVPStatus) || null);
     setLoading(false);
-  };
+  }, [id, user]);
 
-  const handleRSVP = async (status: 'going' | 'interested') => {
+  useEffect(() => {
+    loadEvent();
+  }, [loadEvent]);
+
+  const handleRSVP = useCallback(
+    async (status: 'going' | 'interested') => {
+      if (!event || !user) return;
+      setUpdating(true);
+
+      // Optimistic UI: immediately reflect the new status.
+      const prevStatus = userStatus;
+      setUserStatus(status);
+
+      try {
+        if (prevStatus) {
+          await supabase.from('event_attendees').delete().match({
+            event_id: event.id,
+            profile_id: user.id,
+          });
+        }
+
+        const { error } = await supabase.from('event_attendees').insert({
+          event_id: event.id,
+          profile_id: user.id,
+          status,
+        });
+
+        if (error) throw error;
+
+        // Reconcile with server state (keeps attendee list + status in sync).
+        await loadEvent();
+      } catch {
+        // Roll back on failure.
+        setUserStatus(prevStatus);
+      } finally {
+        setUpdating(false);
+      }
+    },
+    [event, user, userStatus, loadEvent],
+  );
+
+  const handleRemoveRSVP = useCallback(async () => {
     if (!event || !user) return;
     setUpdating(true);
 
-    if (userStatus) {
-      await supabase.from('event_attendees').delete().match({
+    // Optimistic UI: clear status immediately.
+    const prevStatus = userStatus;
+    setUserStatus(null);
+
+    try {
+      const { error } = await supabase.from('event_attendees').delete().match({
         event_id: event.id,
         profile_id: user.id,
       });
+
+      if (error) throw error;
+
+      // Reconcile with server state.
+      await loadEvent();
+    } catch {
+      // Roll back on failure.
+      setUserStatus(prevStatus);
+    } finally {
+      setUpdating(false);
     }
+  }, [event, user, userStatus, loadEvent]);
 
-    await supabase.from('event_attendees').insert({
-      event_id: event.id,
-      profile_id: user.id,
-      status,
-    });
-
-    await loadEvent();
-    setUpdating(false);
-  };
-
-  const handleRemoveRSVP = async () => {
-    if (!event || !user) return;
-    setUpdating(true);
-    await supabase.from('event_attendees').delete().match({
-      event_id: event.id,
-      profile_id: user.id,
-    });
-    setUserStatus(null);
-    setUpdating(false);
-  };
-
-  const formatDate = (dateStr: string) => {
+  const formatDate = useCallback((dateStr: string) => {
     const date = new Date(dateStr);
     return date.toLocaleDateString('en-US', {
       weekday: 'long',
@@ -113,31 +150,46 @@ export default function EventDetailScreen() {
       day: 'numeric',
       year: 'numeric',
     });
-  };
+  }, []);
 
-  const formatTime = (dateStr: string) => {
+  const formatTime = useCallback((dateStr: string) => {
     const date = new Date(dateStr);
     return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-  };
+  }, []);
 
-  const getEventTypeLabel = (type: string) => {
+  const getEventTypeLabel = useCallback((type: string) => {
     switch (type) {
       case 'online': return 'Online Event';
       case 'physical': return 'In Person';
       case 'hybrid': return 'Hybrid Event';
       default: return type;
     }
-  };
+  }, []);
 
-  const initials = (name: string) =>
-    name.split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase();
+  const initials = useCallback(
+    (name: string) =>
+      name.split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase(),
+    [],
+  );
+
+  const goingCount = useMemo(() => attendees.length, [attendees]);
 
   if (loading) {
     return (
       <MainLayout>
-        <Box sx={{ display: 'flex', justifyContent: 'center', py: 12 }}>
-          <CircularProgress size={20} thickness={2.5} />
+        <Box sx={{ borderBottom: '1px solid', borderColor: 'divider', position: 'sticky', top: 0, bgcolor: 'background.default', zIndex: 100 }}>
+          <Container maxWidth="sm">
+            <Stack direction="row" alignItems="center" spacing={2} sx={{ py: 2 }}>
+              <IconButton disabled>
+                <ArrowBackIcon />
+              </IconButton>
+              <Skeleton variant="text" width={80} height={28} />
+            </Stack>
+          </Container>
         </Box>
+        <Container maxWidth="sm">
+          <DetailSkeleton />
+        </Container>
       </MainLayout>
     );
   }
@@ -154,8 +206,6 @@ export default function EventDetailScreen() {
       </MainLayout>
     );
   }
-
-  const goingCount = attendees.length;
 
   return (
     <MainLayout>

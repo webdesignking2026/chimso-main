@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Box from '@mui/material/Box';
 import Container from '@mui/material/Container';
@@ -18,11 +18,14 @@ import { supabase } from '../lib/supabase';
 import type { Community } from '../lib/supabase';
 import MainLayout from '../components/MainLayout';
 import { useAuth } from '../context/AuthContext';
+import { ListSkeleton } from '../components/Skeletons';
 
 type CommunityWithMembership = Community & {
   is_member?: boolean;
   user_role?: string;
 };
+
+const DISCOVER_LIMIT = 50;
 
 export default function CommunitiesScreen() {
   const navigate = useNavigate();
@@ -34,29 +37,26 @@ export default function CommunitiesScreen() {
   const [discoverCommunities, setDiscoverCommunities] = useState<CommunityWithMembership[]>([]);
   const [joining, setJoining] = useState<string>('');
 
-  useEffect(() => {
-    loadData();
-  }, [user]);
-
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     if (!user) return;
     setLoading(true);
 
-    // Get user's memberships
-    const { data: memberships } = await supabase
-      .from('community_members')
-      .select('community_id, role')
-      .eq('profile_id', user.id);
+    // Fetch memberships and communities in parallel
+    const [{ data: memberships }, { data: allCommunities }] = await Promise.all([
+      supabase
+        .from('community_members')
+        .select('community_id, role')
+        .eq('profile_id', user.id),
+      supabase
+        .from('communities')
+        .select('id, name, slug, description, icon_url, cover_url, creator_id, is_private, rules, member_count, created_at, updated_at')
+        .or('is_private.eq.false,creator_id.eq.' + user.id)
+        .order('member_count', { ascending: false })
+        .limit(DISCOVER_LIMIT),
+    ]);
 
     const memberCommunityIds = new Set((memberships ?? []).map((m) => m.community_id));
     const roleMap = new Map((memberships ?? []).map((m) => [m.community_id, m.role]));
-
-    // Get all public communities
-    const { data: allCommunities } = await supabase
-      .from('communities')
-      .select('*')
-      .or('is_private.eq.false,creator_id.eq.' + user.id)
-      .order('member_count', { ascending: false });
 
     if (allCommunities) {
       const enriched = allCommunities.map((c) => ({
@@ -69,33 +69,60 @@ export default function CommunitiesScreen() {
     }
 
     setLoading(false);
-  };
+  }, [user]);
 
-  const handleJoin = async (communityId: string) => {
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  const handleJoin = useCallback(async (communityId: string) => {
     if (!user) return;
     setJoining(communityId);
-    await supabase.from('community_members').insert({
+    // Optimistic: move from discover to joined
+    setDiscoverCommunities((prev) => prev.filter((c) => c.id !== communityId));
+    setJoinedCommunities((prev) => {
+      const community = discoverCommunities.find((c) => c.id === communityId);
+      return community ? [{ ...community, is_member: true }, ...prev] : prev;
+    });
+
+    const { error } = await supabase.from('community_members').insert({
       community_id: communityId,
       profile_id: user.id,
       role: 'member',
     });
-    await loadData();
+    if (error) {
+      // Revert
+      await loadData();
+    }
     setJoining('');
-  };
+  }, [user, discoverCommunities, loadData]);
 
-  const handleLeave = async (communityId: string) => {
+  const handleLeave = useCallback(async (communityId: string) => {
     if (!user) return;
     setJoining(communityId);
-    await supabase.from('community_members').delete().match({
+    // Optimistic: move from joined to discover
+    setJoinedCommunities((prev) => prev.filter((c) => c.id !== communityId));
+    setDiscoverCommunities((prev) => {
+      const community = joinedCommunities.find((c) => c.id === communityId);
+      return community ? [{ ...community, is_member: false }, ...prev] : prev;
+    });
+
+    const { error } = await supabase.from('community_members').delete().match({
       community_id: communityId,
       profile_id: user.id,
     });
-    await loadData();
+    if (error) {
+      await loadData();
+    }
     setJoining('');
-  };
+  }, [user, joinedCommunities, loadData]);
 
-  const filteredCommunities = (activeTab === 'joined' ? joinedCommunities : discoverCommunities)
-    .filter((c) => c.name.toLowerCase().includes(search.toLowerCase()));
+  const filteredCommunities = useMemo(() => {
+    const source = activeTab === 'joined' ? joinedCommunities : discoverCommunities;
+    if (!search) return source;
+    const q = search.toLowerCase();
+    return source.filter((c) => c.name.toLowerCase().includes(q));
+  }, [activeTab, joinedCommunities, discoverCommunities, search]);
 
   return (
     <MainLayout>
@@ -163,9 +190,7 @@ export default function CommunitiesScreen() {
       {/* Content */}
       <Container maxWidth="sm" sx={{ py: 3 }}>
         {loading ? (
-          <Box sx={{ display: 'flex', justifyContent: 'center', py: 8 }}>
-            <CircularProgress size={20} thickness={2.5} />
-          </Box>
+          <ListSkeleton count={5} />
         ) : filteredCommunities.length === 0 ? (
           <Box sx={{ textAlign: 'center', py: 8 }}>
             <Typography variant="h3" sx={{ mb: 2, color: 'text.primary' }}>

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import Box from '@mui/material/Box';
 import Container from '@mui/material/Container';
@@ -17,6 +17,7 @@ import RadioButtonUncheckedIcon from '@mui/icons-material/RadioButtonUnchecked';
 import { supabase } from '../lib/supabase';
 import type { LearningTrack, LearningLesson, Profile } from '../lib/supabase';
 import MainLayout from '../components/MainLayout';
+import { DetailSkeleton } from '../components/Skeletons';
 import { useAuth } from '../context/AuthContext';
 
 type LessonWithProgress = LearningLesson & {
@@ -33,13 +34,12 @@ export default function LearningTrackScreen() {
   const [currentLesson, setCurrentLesson] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    loadTrack();
-  }, [id, user]);
-
-  const loadTrack = async () => {
+  const loadTrack = useCallback(async () => {
     if (!id || !user) return;
 
+    setLoading(true);
+
+    // Step 1: fetch the track (needed before we can render anything meaningful).
     const { data: trackData } = await supabase
       .from('learning_tracks')
       .select('*, profiles(display_name, avatar_url, username)')
@@ -48,6 +48,8 @@ export default function LearningTrackScreen() {
 
     if (!trackData) {
       setTrack(null);
+      setCreator(null);
+      setLessons([]);
       setLoading(false);
       return;
     }
@@ -55,51 +57,92 @@ export default function LearningTrackScreen() {
     setTrack(trackData as LearningTrack);
     setCreator(trackData.profiles as Profile);
 
-    // Get lessons
-    const { data: lessonsData } = await supabase
-      .from('learning_lessons')
-      .select('*')
-      .eq('track_id', id)
-      .order('order_index', { ascending: true });
+    // Step 2: fetch lessons + progress in parallel (previously a 3-step waterfall).
+    const [lessonsRes, progressRes] = await Promise.all([
+      supabase
+        .from('learning_lessons')
+        // Select only the columns we use in the UI. `content` and `video_url`
+        // are required for the expanded lesson view, so they are kept; the
+        // unused `created_at` / `updated_at` are dropped.
+        .select('id, track_id, order_index, title, duration_minutes, content, video_url')
+        .eq('track_id', id)
+        .order('order_index', { ascending: true }),
+      supabase
+        .from('learning_progress')
+        // Select only the columns we use to build the progress map.
+        .select('lesson_id, completed')
+        .eq('profile_id', user.id),
+    ]);
 
-    // Get progress
-    const { data: progressData } = await supabase
-      .from('learning_progress')
-      .select('*')
-      .eq('profile_id', user.id);
+    const progressMap = new Map(
+      (progressRes.data ?? []).map((p) => [p.lesson_id, p.completed]),
+    );
 
-    const progressMap = new Map((progressData ?? []).map((p) => [p.lesson_id, p.completed]));
-
-    const enriched = (lessonsData ?? []).map((l) => ({
-      ...l,
+    const enriched: LessonWithProgress[] = (lessonsRes.data ?? []).map((l) => ({
+      ...(l as LearningLesson),
       completed: progressMap.get(l.id) || false,
     }));
 
     setLessons(enriched);
     setLoading(false);
-  };
+  }, [id, user]);
 
-  const handleCompleteLesson = async (lessonId: string, completed: boolean) => {
-    if (!user) return;
+  useEffect(() => {
+    loadTrack();
+  }, [loadTrack]);
 
-    if (completed) {
-      // Unmark as complete
-      await supabase.from('learning_progress').delete().match({
-        profile_id: user.id,
-        lesson_id: lessonId,
-      });
-    } else {
-      // Mark as complete
-      await supabase.from('learning_progress').upsert({
-        profile_id: user.id,
-        lesson_id: lessonId,
-        completed: true,
-        completed_at: new Date().toISOString(),
-      });
-    }
+  const handleCompleteLesson = useCallback(
+    async (lessonId: string, completed: boolean) => {
+      if (!user) return;
 
-    await loadTrack();
-  };
+      // Optimistic UI: update the local state immediately so the toggle feels
+      // instant. We roll back if the server request fails.
+      const newCompleted = !completed;
+      setLessons((prev) =>
+        prev.map((l) => (l.id === lessonId ? { ...l, completed: newCompleted } : l)),
+      );
+
+      let error: unknown = null;
+      if (completed) {
+        // Unmark as complete
+        ({ error } = await supabase.from('learning_progress').delete().match({
+          profile_id: user.id,
+          lesson_id: lessonId,
+        }));
+      } else {
+        // Mark as complete
+        ({ error } = await supabase.from('learning_progress').upsert({
+          profile_id: user.id,
+          lesson_id: lessonId,
+          completed: true,
+          completed_at: new Date().toISOString(),
+        }));
+      }
+
+      if (error) {
+        // Roll back the optimistic update on failure.
+        setLessons((prev) =>
+          prev.map((l) => (l.id === lessonId ? { ...l, completed } : l)),
+        );
+      }
+    },
+    [user],
+  );
+
+  const handleToggleLesson = useCallback(
+    (lessonId: string) => {
+      setCurrentLesson((prev) => (prev === lessonId ? null : lessonId));
+    },
+    [],
+  );
+
+  const handleBack = useCallback(() => {
+    navigate(-1);
+  }, [navigate]);
+
+  const handleBackToLearning = useCallback(() => {
+    navigate('/learn');
+  }, [navigate]);
 
   const completedCount = lessons.filter((l) => l.completed).length;
   const progressPercent = lessons.length > 0 ? (completedCount / lessons.length) * 100 : 0;
@@ -110,7 +153,7 @@ export default function LearningTrackScreen() {
   if (loading) {
     return (
       <MainLayout>
-        <LinearProgress />
+        <DetailSkeleton />
       </MainLayout>
     );
   }
@@ -120,7 +163,7 @@ export default function LearningTrackScreen() {
       <MainLayout>
         <Container maxWidth="sm" sx={{ py: 12, textAlign: 'center' }}>
           <Typography variant="h3">Track not found</Typography>
-          <Button sx={{ mt: 4 }} onClick={() => navigate('/learn')}>
+          <Button sx={{ mt: 4 }} onClick={handleBackToLearning}>
             Back to learning
           </Button>
         </Container>
@@ -134,7 +177,7 @@ export default function LearningTrackScreen() {
       <Box sx={{ borderBottom: '1px solid', borderColor: 'divider', position: 'sticky', top: 0, bgcolor: 'background.default', zIndex: 100 }}>
         <Container maxWidth="sm">
           <Stack direction="row" alignItems="center" spacing={2} sx={{ py: 2 }}>
-            <IconButton onClick={() => navigate(-1)}>
+            <IconButton onClick={handleBack}>
               <ArrowBackIcon />
             </IconButton>
             <Typography variant="h5" sx={{ fontWeight: 700 }}>
@@ -209,7 +252,7 @@ export default function LearningTrackScreen() {
               {lessons.map((lesson, idx) => (
                 <Box
                   key={lesson.id}
-                  onClick={() => setCurrentLesson(currentLesson === lesson.id ? null : lesson.id)}
+                  onClick={() => handleToggleLesson(lesson.id)}
                   sx={{
                     p: 3,
                     borderRadius: 2,

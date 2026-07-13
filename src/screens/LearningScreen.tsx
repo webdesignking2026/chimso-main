@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Box from '@mui/material/Box';
 import Container from '@mui/material/Container';
@@ -6,7 +6,6 @@ import Typography from '@mui/material/Typography';
 import Stack from '@mui/material/Stack';
 import Chip from '@mui/material/Chip';
 import Divider from '@mui/material/Divider';
-import CircularProgress from '@mui/material/CircularProgress';
 import InputAdornment from '@mui/material/InputAdornment';
 import TextField from '@mui/material/TextField';
 import SearchIcon from '@mui/icons-material/Search';
@@ -18,6 +17,7 @@ import AccessTimeIcon from '@mui/icons-material/AccessTime';
 import { supabase } from '../lib/supabase';
 import type { LearningTrack, Profile } from '../lib/supabase';
 import MainLayout from '../components/MainLayout';
+import { ListSkeleton } from '../components/Skeletons';
 import { useAuth } from '../context/AuthContext';
 
 type TrackWithProgress = LearningTrack & {
@@ -38,7 +38,7 @@ export default function LearningScreen() {
     loadTracks();
   }, [user, filter]);
 
-  const loadTracks = async () => {
+  const loadTracks = useCallback(async () => {
     if (!user) return;
     setLoading(true);
 
@@ -60,47 +60,70 @@ export default function LearningScreen() {
 
     const { data } = await query.limit(50);
 
-    // Get lesson counts
-    const enriched = await Promise.all(
-      (data ?? []).map(async (track) => {
-        const { count } = await supabase
-          .from('learning_lessons')
-          .select('*', { count: 'exact', head: true })
-          .eq('track_id', track.id);
+    const tracksData = data ?? [];
 
-        return { ...track, lessons_count: count || 0 };
-      })
-    );
+    // Fetch ALL lesson counts in a single query instead of one-per-track (N+1 fix)
+    let lessonsCountByTrack: Record<string, number> = {};
+    if (tracksData.length > 0) {
+      const trackIds = tracksData.map((t) => t.id);
+      const { data: lessonsData } = await supabase
+        .from('learning_lessons')
+        .select('track_id')
+        .in('track_id', trackIds);
+
+      lessonsCountByTrack = (lessonsData ?? []).reduce<Record<string, number>>((acc, row) => {
+        const tid = (row as { track_id: string }).track_id;
+        acc[tid] = (acc[tid] || 0) + 1;
+        return acc;
+      }, {});
+    }
+
+    const enriched = tracksData.map((track) => ({
+      ...track,
+      lessons_count: lessonsCountByTrack[track.id] || 0,
+    }));
 
     setTracks(enriched);
     setLoading(false);
-  };
+  }, [user, filter]);
 
-  const getTypeIcon = (type: string) => {
+  const getTypeIcon = useCallback((type: string) => {
     switch (type) {
       case 'course': return <SchoolIcon sx={{ fontSize: 18 }} />;
       case 'guide': return <MenuBookIcon sx={{ fontSize: 18 }} />;
       case 'article': return <ArticleIcon sx={{ fontSize: 18 }} />;
       default: return <LightbulbIcon sx={{ fontSize: 18 }} />;
     }
-  };
+  }, []);
 
-  const getTypeLabel = (type: string) => {
+  const getTypeLabel = useCallback((type: string) => {
     return type.charAt(0).toUpperCase() + type.slice(1);
-  };
+  }, []);
 
-  const getDifficultyColor = (difficulty: string) => {
+  const getDifficultyColor = useCallback((difficulty: string) => {
     switch (difficulty) {
       case 'beginner': return 'success';
       case 'intermediate': return 'warning';
       case 'advanced': return 'error';
       default: return 'default';
     }
-  };
+  }, []);
 
-  const filtered = tracks.filter((t) =>
-    t.title.toLowerCase().includes(search.toLowerCase()) ||
-    t.description.toLowerCase().includes(search.toLowerCase())
+  const handleFilterChange = useCallback((next: 'all' | 'courses' | 'guides' | 'resources') => {
+    setFilter(next);
+  }, []);
+
+  const handleSearchChange = useCallback((e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    setSearch(e.target.value);
+  }, []);
+
+  const filtered = useMemo(
+    () =>
+      tracks.filter((t) =>
+        t.title.toLowerCase().includes(search.toLowerCase()) ||
+        t.description.toLowerCase().includes(search.toLowerCase())
+      ),
+    [tracks, search]
   );
 
   return (
@@ -118,22 +141,22 @@ export default function LearningScreen() {
           <Stack direction="row" spacing={1.5}>
             <Chip
               label="All"
-              onClick={() => setFilter('all')}
+              onClick={() => handleFilterChange('all')}
               variant={filter === 'all' ? 'filled' : 'outlined'}
             />
             <Chip
               label="Courses"
-              onClick={() => setFilter('courses')}
+              onClick={() => handleFilterChange('courses')}
               variant={filter === 'courses' ? 'filled' : 'outlined'}
             />
             <Chip
               label="Guides"
-              onClick={() => setFilter('guides')}
+              onClick={() => handleFilterChange('guides')}
               variant={filter === 'guides' ? 'filled' : 'outlined'}
             />
             <Chip
               label="Resources"
-              onClick={() => setFilter('resources')}
+              onClick={() => handleFilterChange('resources')}
               variant={filter === 'resources' ? 'filled' : 'outlined'}
             />
           </Stack>
@@ -146,7 +169,7 @@ export default function LearningScreen() {
             size="small"
             placeholder="Search learning content..."
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={handleSearchChange}
             InputProps={{
               startAdornment: (
                 <InputAdornment position="start">
@@ -168,9 +191,7 @@ export default function LearningScreen() {
       {/* Content */}
       <Container maxWidth="sm" sx={{ py: 3 }}>
         {loading ? (
-          <Box sx={{ display: 'flex', justifyContent: 'center', py: 8 }}>
-            <CircularProgress size={20} thickness={2.5} />
-          </Box>
+          <ListSkeleton count={6} />
         ) : filtered.length === 0 ? (
           <Box sx={{ textAlign: 'center', py: 8 }}>
             <Typography variant="h3" sx={{ mb: 2 }}>

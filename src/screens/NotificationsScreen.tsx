@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Box from '@mui/material/Box';
 import Container from '@mui/material/Container';
@@ -6,11 +6,11 @@ import Typography from '@mui/material/Typography';
 import Stack from '@mui/material/Stack';
 import Avatar from '@mui/material/Avatar';
 import Divider from '@mui/material/Divider';
-import CircularProgress from '@mui/material/CircularProgress';
 import FavoriteIcon from '@mui/icons-material/Favorite';
 import PersonIcon from '@mui/icons-material/Person';
 import GroupsIcon from '@mui/icons-material/Groups';
 import EventIcon from '@mui/icons-material/Event';
+import Skeleton from '@mui/material/Skeleton';
 import { supabase } from '../lib/supabase';
 import type { Notification } from '../lib/supabase';
 import MainLayout from '../components/MainLayout';
@@ -26,17 +26,31 @@ const notificationIcons: Record<string, React.ReactElement> = {
   announcement: <GroupsIcon sx={{ fontSize: 16, color: 'primary.main' }} />,
 };
 
+const PAGE_SIZE = 50;
+
 export default function NotificationsScreen() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [loading, setLoading] = useState(true);
 
+  const loadNotifications = useCallback(async () => {
+    if (!user) return;
+    const { data } = await supabase
+      .from('notifications')
+      .select('*, profiles(display_name, avatar_url, username)')
+      .eq('profile_id', user.id)
+      .order('created_at', { ascending: false })
+      .limit(PAGE_SIZE);
+
+    setNotifications(data ?? []);
+    setLoading(false);
+  }, [user]);
+
   useEffect(() => {
     if (!user) return;
     loadNotifications();
 
-    // Real-time subscription: new notifications appear instantly
     const channel = supabase
       .channel(`notifications-screen-${user.id}`)
       .on(
@@ -49,8 +63,6 @@ export default function NotificationsScreen() {
         },
         async (payload) => {
           if (payload.eventType === 'INSERT') {
-            // Fetch the full notification row with actor profile (the raw INSERT
-            // payload doesn't include joined data)
             const { data } = await supabase
               .from('notifications')
               .select('*, profiles(display_name, avatar_url, username)')
@@ -73,39 +85,26 @@ export default function NotificationsScreen() {
       .subscribe();
 
     return () => { supabase.removeChannel(channel); };
-  }, [user]);
+  }, [user, loadNotifications]);
 
-  const loadNotifications = async () => {
-    if (!user) return;
-    const { data } = await supabase
-      .from('notifications')
-      .select('*, profiles(display_name, avatar_url, username)')
-      .eq('profile_id', user.id)
-      .order('created_at', { ascending: false })
-      .limit(100);
-
-    setNotifications(data ?? []);
-    setLoading(false);
-  };
-
-  const markAsRead = async (id: string) => {
-    await supabase.from('notifications').update({ read_at: new Date().toISOString() }).eq('id', id);
+  const markAsRead = useCallback(async (id: string) => {
     setNotifications((prev) =>
       prev.map((n) => (n.id === id ? { ...n, read_at: new Date().toISOString() } : n))
     );
-  };
+    await supabase.from('notifications').update({ read_at: new Date().toISOString() }).eq('id', id);
+  }, []);
 
-  const markAllRead = async () => {
+  const markAllRead = useCallback(async () => {
     if (!user) return;
+    setNotifications((prev) => prev.map((n) => ({ ...n, read_at: n.read_at || new Date().toISOString() })));
     await supabase
       .from('notifications')
       .update({ read_at: new Date().toISOString() })
       .eq('profile_id', user.id)
       .is('read_at', null);
-    setNotifications((prev) => prev.map((n) => ({ ...n, read_at: new Date().toISOString() })));
-  };
+  }, [user]);
 
-  const formatTime = (ts: string) => {
+  const formatTime = useCallback((ts: string) => {
     const diff = Date.now() - new Date(ts).getTime();
     const m = Math.floor(diff / 60000);
     if (m < 1) return 'just now';
@@ -113,12 +112,12 @@ export default function NotificationsScreen() {
     const h = Math.floor(m / 60);
     if (h < 24) return `${h}h`;
     return `${Math.floor(h / 24)}d`;
-  };
+  }, []);
 
-  const initials = (name: string) =>
-    name.split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase();
+  const initials = useCallback((name: string) =>
+    name.split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase(), []);
 
-  const unreadCount = notifications.filter((n) => !n.read_at).length;
+  const unreadCount = useMemo(() => notifications.filter((n) => !n.read_at).length, [notifications]);
 
   return (
     <MainLayout>
@@ -145,9 +144,20 @@ export default function NotificationsScreen() {
       {/* Content */}
       <Container maxWidth="sm" sx={{ py: 2 }}>
         {loading ? (
-          <Box sx={{ display: 'flex', justifyContent: 'center', py: 8 }}>
-            <CircularProgress size={20} thickness={2.5} />
-          </Box>
+          <Stack spacing={0}>
+            {Array.from({ length: 6 }).map((_, i) => (
+              <Box key={i} sx={{ p: 3, borderBottom: '1px solid', borderColor: 'divider' }}>
+                <Stack direction="row" spacing={2}>
+                  <Skeleton variant="circular" width={44} height={44} />
+                  <Stack spacing={0.5} sx={{ flex: 1 }}>
+                    <Skeleton variant="text" width="60%" height={20} />
+                    <Skeleton variant="text" width="80%" height={16} />
+                    <Skeleton variant="text" width={40} height={12} />
+                  </Stack>
+                </Stack>
+              </Box>
+            ))}
+          </Stack>
         ) : notifications.length === 0 ? (
           <Box sx={{ textAlign: 'center', py: 8 }}>
             <Typography variant="body1" sx={{ color: 'text.secondary' }}>

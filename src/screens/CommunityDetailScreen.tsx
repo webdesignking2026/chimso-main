@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import Box from '@mui/material/Box';
 import Container from '@mui/material/Container';
@@ -9,37 +9,29 @@ import Button from '@mui/material/Button';
 import Divider from '@mui/material/Divider';
 import IconButton from '@mui/material/IconButton';
 import CircularProgress from '@mui/material/CircularProgress';
-import LinearProgress from '@mui/material/LinearProgress';
 import Tabs from '@mui/material/Tabs';
 import Tab from '@mui/material/Tab';
 import Menu from '@mui/material/Menu';
 import MenuItem from '@mui/material/MenuItem';
 import Snackbar from '@mui/material/Snackbar';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
-import ChatBubbleOutlineIcon from '@mui/icons-material/ChatBubbleOutline';
-import FavoriteBorderIcon from '@mui/icons-material/FavoriteBorder';
-import FavoriteIcon from '@mui/icons-material/Favorite';
-import BookmarkBorderIcon from '@mui/icons-material/BookmarkBorder';
-import BookmarkIcon from '@mui/icons-material/Bookmark';
-import ShareIcon from '@mui/icons-material/Share';
 import SettingsIcon from '@mui/icons-material/Settings';
-import MoreHorizIcon from '@mui/icons-material/MoreHoriz';
 import { supabase } from '../lib/supabase';
 import type { Post, Community } from '../lib/supabase';
 import MainLayout from '../components/MainLayout';
 import { useAuth } from '../context/AuthContext';
 import EditPostDialog from '../components/EditPostDialog';
+import PostCard, { type FeedPost } from '../components/PostCard';
+import { DetailSkeleton } from '../components/Skeletons';
 
-type PostWithProfile = Post & {
-  profiles: { display_name: string; avatar_url: string; username: string | null };
-};
+const POST_PAGE_SIZE = 20;
 
 export default function CommunityDetailScreen() {
   const { slug } = useParams();
   const navigate = useNavigate();
   const { user } = useAuth();
   const [community, setCommunity] = useState<Community | null>(null);
-  const [posts, setPosts] = useState<PostWithProfile[]>([]);
+  const [posts, setPosts] = useState<FeedPost[]>([]);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState(0);
   const [isMember, setIsMember] = useState(false);
@@ -50,18 +42,14 @@ export default function CommunityDetailScreen() {
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
   const [menuPost, setMenuPost] = useState<string>('');
   const [editDialogOpen, setEditDialogOpen] = useState(false);
-  const [editingPost, setEditingPost] = useState<PostWithProfile | null>(null);
+  const [editingPost, setEditingPost] = useState<FeedPost | null>(null);
   const [snackbar, setSnackbar] = useState('');
 
-  useEffect(() => {
-    loadCommunity();
-  }, [slug, user]);
-
-  const loadCommunity = async () => {
+  const loadCommunity = useCallback(async () => {
     if (!slug || !user) return;
     setLoading(true);
 
-    // Get community
+    // Step 1: Fetch community first (needed for community_id)
     const { data: communityData } = await supabase
       .from('communities')
       .select('*, profiles(display_name, avatar_url)')
@@ -76,75 +64,144 @@ export default function CommunityDetailScreen() {
 
     setCommunity(communityData as Community);
 
-    // Check membership
-    const { data: membership } = await supabase
-      .from('community_members')
-      .select('role')
-      .eq('community_id', communityData.id)
-      .eq('profile_id', user.id)
-      .maybeSingle();
+    // Step 2: Fetch membership and posts in parallel
+    const [{ data: membership }, { data: postsData }] = await Promise.all([
+      supabase
+        .from('community_members')
+        .select('role')
+        .eq('community_id', communityData.id)
+        .eq('profile_id', user.id)
+        .maybeSingle(),
+      supabase
+        .from('posts')
+        .select('*, profiles!posts_profile_id_fkey(display_name, avatar_url, username), niches(*)')
+        .eq('community_id', communityData.id)
+        .order('created_at', { ascending: false })
+        .limit(POST_PAGE_SIZE),
+    ]);
 
+    const loadedPosts = (postsData ?? []) as FeedPost[];
     setIsMember(!!membership);
     setUserRole(membership?.role || null);
+    setPosts(loadedPosts);
 
-    // Get posts
-    const { data: postsData } = await supabase
-      .from('posts')
-      .select('*, profiles!posts_profile_id_fkey(display_name, avatar_url, username), niches(name)')
-      .eq('community_id', communityData.id)
-      .order('created_at', { ascending: false })
-      .limit(50);
-
-    setPosts((postsData ?? []) as PostWithProfile[]);
+    // Step 3: Load interaction state (non-blocking)
+    if (loadedPosts.length > 0) {
+      const ids = loadedPosts.map((p) => p.id);
+      const [{ data: likesData }, { data: bookmarksData }] = await Promise.all([
+        supabase.from('likes').select('post_id').eq('profile_id', user.id).in('post_id', ids),
+        supabase.from('bookmarks').select('post_id').eq('profile_id', user.id).in('post_id', ids),
+      ]);
+      setLiked(new Set((likesData ?? []).map((l) => l.post_id as string)));
+      setBookmarked(new Set((bookmarksData ?? []).map((b) => b.post_id as string)));
+    }
 
     setLoading(false);
-  };
+  }, [slug, user]);
 
-  const handleJoinLeave = async () => {
+  useEffect(() => {
+    loadCommunity();
+  }, [loadCommunity]);
+
+  const handleJoinLeave = useCallback(async () => {
     if (!community || !user) return;
     setJoining(true);
 
     if (isMember) {
-      await supabase.from('community_members').delete().match({
+      setIsMember(false);
+      setCommunity((prev) => prev ? { ...prev, member_count: Math.max(0, prev.member_count - 1) } : null);
+      const { error } = await supabase.from('community_members').delete().match({
         community_id: community.id,
         profile_id: user.id,
       });
+      if (error) {
+        setIsMember(true);
+        setCommunity((prev) => prev ? { ...prev, member_count: (prev.member_count || 0) + 1 } : null);
+      }
     } else {
-      await supabase.from('community_members').insert({
+      setIsMember(true);
+      setCommunity((prev) => prev ? { ...prev, member_count: (prev.member_count || 0) + 1 } : null);
+      const { error } = await supabase.from('community_members').insert({
         community_id: community.id,
         profile_id: user.id,
         role: 'member',
       });
+      if (error) {
+        setIsMember(false);
+        setCommunity((prev) => prev ? { ...prev, member_count: Math.max(0, prev.member_count - 1) } : null);
+      }
     }
 
-    await loadCommunity();
     setJoining(false);
-  };
+  }, [community, user, isMember]);
 
-  const toggleLike = (postId: string) => {
+  const toggleLike = useCallback(async (postId: string) => {
+    if (!user) return;
+    const isLiked = liked.has(postId);
+
     setLiked((prev) => {
       const n = new Set(prev);
-      n.has(postId) ? n.delete(postId) : n.add(postId);
+      isLiked ? n.delete(postId) : n.add(postId);
       return n;
     });
-  };
+    setPosts((prev) =>
+      prev.map((p) =>
+        p.id === postId
+          ? { ...p, like_count: Math.max(0, (p.like_count || 0) + (isLiked ? -1 : 1)) }
+          : p
+      )
+    );
 
-  const toggleBookmark = (postId: string) => {
+    if (isLiked) {
+      const { error } = await supabase.from('likes').delete().match({ profile_id: user.id, post_id: postId });
+      if (error) {
+        setLiked((prev) => { const n = new Set(prev); n.add(postId); return n; });
+        setPosts((prev) => prev.map((p) => (p.id === postId ? { ...p, like_count: (p.like_count || 0) + 1 } : p)));
+      }
+    } else {
+      const { error } = await supabase.from('likes').insert({ profile_id: user.id, post_id: postId });
+      if (error) {
+        setLiked((prev) => { const n = new Set(prev); n.delete(postId); return n; });
+        setPosts((prev) => prev.map((p) => (p.id === postId ? { ...p, like_count: Math.max(0, (p.like_count || 0) - 1) } : p)));
+      }
+    }
+  }, [user, liked]);
+
+  const toggleBookmark = useCallback(async (postId: string) => {
+    if (!user) return;
+    const isBookmarked = bookmarked.has(postId);
+
     setBookmarked((prev) => {
       const n = new Set(prev);
-      n.has(postId) ? n.delete(postId) : n.add(postId);
+      isBookmarked ? n.delete(postId) : n.add(postId);
       return n;
     });
-  };
 
-  const handleOpenEdit = () => {
+    if (isBookmarked) {
+      const { error } = await supabase.from('bookmarks').delete().match({ profile_id: user.id, post_id: postId });
+      if (error) {
+        setBookmarked((prev) => { const n = new Set(prev); n.add(postId); return n; });
+      } else {
+        setSnackbar('Bookmark removed.');
+      }
+    } else {
+      const { error } = await supabase.from('bookmarks').insert({ profile_id: user.id, post_id: postId });
+      if (error) {
+        setBookmarked((prev) => { const n = new Set(prev); n.delete(postId); return n; });
+      } else {
+        setSnackbar('Post saved!');
+      }
+    }
+  }, [user, bookmarked]);
+
+  const handleOpenEdit = useCallback(() => {
     const post = posts.find((p) => p.id === menuPost) ?? null;
     setEditingPost(post);
     setEditDialogOpen(true);
     setAnchorEl(null);
-  };
+  }, [posts, menuPost]);
 
-  const handleEditSaved = (updated: Partial<Post>) => {
+  const handleEditSaved = useCallback((updated: Partial<Post>) => {
     setPosts((prev) =>
       prev.map((p) =>
         p.id === updated.id
@@ -153,32 +210,62 @@ export default function CommunityDetailScreen() {
       )
     );
     setSnackbar('Post updated.');
-  };
+  }, []);
 
-  const handleDelete = async (postId: string) => {
+  const handleDelete = useCallback(async (postId: string) => {
     setAnchorEl(null);
-    await supabase.from('posts').delete().eq('id', postId);
-    setPosts((prev) => prev.filter((p) => p.id !== postId));
-    setSnackbar('Post deleted.');
-  };
+    const { error } = await supabase.from('posts').delete().eq('id', postId);
+    if (!error) {
+      setPosts((prev) => prev.filter((p) => p.id !== postId));
+      setSnackbar('Post deleted.');
+    } else {
+      setSnackbar('Failed to delete post.');
+    }
+  }, []);
 
-  const formatTime = (ts: string) => {
-    const diff = Date.now() - new Date(ts).getTime();
-    const m = Math.floor(diff / 60000);
-    if (m < 1) return 'just now';
-    if (m < 60) return `${m}m`;
-    const h = Math.floor(m / 60);
-    if (h < 24) return `${h}h`;
-    return `${Math.floor(h / 24)}d`;
-  };
+  const handleShare = useCallback(async (post: FeedPost) => {
+    const url = `${window.location.origin}/post/${post.id}`;
+    setPosts((prev) => prev.map((p) => (p.id === post.id ? { ...p, share_count: (p.share_count || 0) + 1 } : p)));
+    const { error } = await supabase.rpc('increment_post_share_count', { post_id: post.id });
+    if (error) {
+      setPosts((prev) => prev.map((p) => (p.id === post.id ? { ...p, share_count: Math.max(0, (p.share_count || 0) - 1) } : p)));
+    }
+    await navigator.clipboard.writeText(url).catch(() => {});
+    setSnackbar('Link copied to clipboard!');
+  }, []);
 
-  const initials = (name: string) =>
-    name.split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase();
+  const handleMenu = useCallback((e: React.MouseEvent<HTMLElement>, postId: string) => {
+    setAnchorEl(e.currentTarget);
+    setMenuPost(postId);
+  }, []);
+
+  const handleComment = useCallback((_postId: string) => {
+    // Could open a comment drawer in the future
+  }, []);
+
+  const postCardProps = useMemo(() => ({
+    onLike: toggleLike,
+    onBookmark: toggleBookmark,
+    onShare: handleShare,
+    onComment: handleComment,
+    onMenu: handleMenu,
+  }), [toggleLike, toggleBookmark, handleShare, handleComment, handleMenu]);
 
   if (loading) {
     return (
       <MainLayout>
-        <LinearProgress />
+        <Box sx={{ borderBottom: '1px solid', borderColor: 'divider', position: 'sticky', top: 0, bgcolor: 'background.default', zIndex: 100 }}>
+          <Container maxWidth="sm">
+            <Stack direction="row" alignItems="center" spacing={2} sx={{ py: 2 }}>
+              <IconButton onClick={() => navigate(-1)}>
+                <ArrowBackIcon />
+              </IconButton>
+            </Stack>
+          </Container>
+        </Box>
+        <Container maxWidth="sm">
+          <DetailSkeleton />
+        </Container>
       </MainLayout>
     );
   }
@@ -285,73 +372,17 @@ export default function CommunityDetailScreen() {
                 </Typography>
               </Box>
             ) : (
-              posts.map((post, idx) => {
-                const isOwn = post.profile_id === user?.id;
-                return (
-                <Box key={post.id}>
-                  <Box sx={{ py: 3 }}>
-                    <Stack direction="row" spacing={2}>
-                      <Avatar
-                        src={post.profiles.avatar_url || undefined}
-                        onClick={() => navigate(`/${post.profiles.username || post.profile_id}`)}
-                        sx={{ width: 40, height: 40, cursor: 'pointer' }}
-                      >
-                        {initials(post.profiles.display_name)}
-                      </Avatar>
-                      <Box sx={{ flex: 1, minWidth: 0 }}>
-                        <Stack direction="row" alignItems="flex-start" justifyContent="space-between">
-                          <Stack direction="row" alignItems="center" spacing={1} flexWrap="wrap">
-                            <Typography
-                              variant="subtitle1"
-                              onClick={() => navigate(`/${post.profiles.username || post.profile_id}`)}
-                              sx={{ fontWeight: 600, cursor: 'pointer', '&:hover': { textDecoration: 'underline' } }}
-                            >
-                              {post.profiles.display_name}
-                            </Typography>
-                            <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-                              {formatTime(post.created_at)}
-                            </Typography>
-                            {post.updated_at && new Date(post.updated_at).getTime() - new Date(post.created_at).getTime() > 5000 && (
-                              <Typography variant="caption" sx={{ color: 'text.disabled' }}>· Edited</Typography>
-                            )}
-                          </Stack>
-                          {isOwn && (
-                            <IconButton size="small" sx={{ color: 'text.secondary' }} onClick={(e) => { setAnchorEl(e.currentTarget); setMenuPost(post.id); }}>
-                              <MoreHorizIcon sx={{ fontSize: 18 }} />
-                            </IconButton>
-                          )}
-                        </Stack>
-                        <Typography variant="body1" sx={{ mt: 1, wordBreak: 'break-word', whiteSpace: 'pre-wrap' }}>
-                          {post.content}
-                        </Typography>
-                        <Stack direction="row" spacing={2} sx={{ mt: 2 }}>
-                          <IconButton size="small">
-                            <ChatBubbleOutlineIcon sx={{ fontSize: 17 }} />
-                          </IconButton>
-                          <IconButton size="small" onClick={() => toggleLike(post.id)}>
-                            {liked.has(post.id) ? (
-                              <FavoriteIcon sx={{ fontSize: 17, color: '#EF4444' }} />
-                            ) : (
-                              <FavoriteBorderIcon sx={{ fontSize: 17 }} />
-                            )}
-                          </IconButton>
-                          <IconButton size="small" onClick={() => toggleBookmark(post.id)}>
-                            {bookmarked.has(post.id) ? (
-                              <BookmarkIcon sx={{ fontSize: 17, color: 'primary.main' }} />
-                            ) : (
-                              <BookmarkBorderIcon sx={{ fontSize: 17 }} />
-                            )}
-                          </IconButton>
-                          <IconButton size="small" onClick={() => { navigator.clipboard.writeText(`${window.location.origin}/post/${post.id}`); setSnackbar('Link copied!'); }}>
-                            <ShareIcon sx={{ fontSize: 17 }} />
-                          </IconButton>
-                        </Stack>
-                      </Box>
-                    </Stack>
-                  </Box>
-                  {idx < posts.length - 1 && <Divider />}
-                </Box>
-              ); })
+              posts.map((post) => (
+                <PostCard
+                  key={post.id}
+                  post={post}
+                  isLiked={liked.has(post.id)}
+                  isBookmarked={bookmarked.has(post.id)}
+                  isOwn={post.profile_id === user?.id}
+                  showDivider={true}
+                  {...postCardProps}
+                />
+              ))
             )}
           </Box>
         )}

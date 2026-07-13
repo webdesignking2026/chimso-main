@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
+import React, { createContext, useContext, useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import type { User, Session } from '@supabase/supabase-js';
 import { supabase } from '../lib/supabase';
 import type { Profile } from '../lib/supabase';
@@ -20,6 +20,8 @@ const AuthContext = createContext<AuthContextType>({
   refreshProfile: async () => {},
 });
 
+const PROFILE_COLUMNS = 'id, username, display_name, bio, avatar_url, cover_url, age, onboarding_complete, follower_count, following_count, post_count, reputation_points, created_at, updated_at';
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [session, setSession] = useState<Session | null>(null);
@@ -27,21 +29,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const initializedRef = useRef(false);
 
-  const loadProfile = async (userId: string) => {
+  const loadProfile = useCallback(async (userId: string) => {
     const { data } = await supabase
       .from('profiles')
-      .select('*')
+      .select(PROFILE_COLUMNS)
       .eq('id', userId)
       .maybeSingle();
-    setProfile(data ?? null);
-  };
+    setProfile(data as Profile | null ?? null);
+  }, []);
 
-  const refreshProfile = async () => {
+  const refreshProfile = useCallback(async () => {
     if (user) await loadProfile(user.id);
-  };
+  }, [user, loadProfile]);
 
   useEffect(() => {
-    // Load persisted session on mount
     supabase.auth.getSession().then(({ data: { session } }) => {
       initializedRef.current = true;
       setSession(session);
@@ -53,9 +54,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
     });
 
-    // Listen for subsequent auth changes (sign in, sign out, token refresh)
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      // Skip the INITIAL_SESSION event — handled by getSession() above
       if (!initializedRef.current) return;
 
       setSession(session);
@@ -69,10 +68,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
 
     return () => subscription.unsubscribe();
-  }, []);
+  }, [loadProfile]);
+
+  const value = useMemo(
+    () => ({ user, session, profile, loading, refreshProfile }),
+    [user, session, profile, loading, refreshProfile],
+  );
 
   return (
-    <AuthContext.Provider value={{ user, session, profile, loading, refreshProfile }}>
+    <AuthContext.Provider value={value}>
       {children}
     </AuthContext.Provider>
   );
