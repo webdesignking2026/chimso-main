@@ -24,6 +24,8 @@ import LearningScreen from './screens/LearningScreen';
 import LearningTrackScreen from './screens/LearningTrackScreen';
 import SettingsScreen from './screens/SettingsScreen';
 import PostDetailScreen from './screens/PostDetailScreen';
+import SplashScreen from './screens/SplashScreen';
+import AgeScreen, { hasAgeBeenCollected, persistAgeIfNeeded } from './screens/AgeScreen';
 import { supabase } from './lib/supabase';
 
 function LoadingScreen() {
@@ -93,14 +95,50 @@ function AppRoutes() {
   );
 }
 
+const SPLASH_KEY = 'chimso-splash-shown';
+
+function AppContent() {
+  const [showSplash, setShowSplash] = useState(() => sessionStorage.getItem(SPLASH_KEY) !== 'true');
+  const [showAge, setShowAge] = useState(false);
+
+  useEffect(() => {
+    if (!showSplash) {
+      setShowAge(!hasAgeBeenCollected());
+    }
+  }, [showSplash]);
+
+  const handleSplashDone = () => {
+    sessionStorage.setItem(SPLASH_KEY, 'true');
+    setShowSplash(false);
+    setShowAge(!hasAgeBeenCollected());
+  };
+
+  const handleAgeDone = () => {
+    setShowAge(false);
+    persistAgeIfNeeded();
+  };
+
+  if (showSplash) {
+    return <SplashScreen onDone={handleSplashDone} />;
+  }
+
+  if (showAge) {
+    return <AgeScreen onDone={handleAgeDone} />;
+  }
+
+  return (
+    <AuthProvider>
+      <AppRoutes />
+    </AuthProvider>
+  );
+}
+
 function App() {
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
       <BrowserRouter>
-        <AuthProvider>
-          <AppRoutes />
-        </AuthProvider>
+        <AppContent />
       </BrowserRouter>
     </ThemeProvider>
   );

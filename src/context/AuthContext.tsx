@@ -2,6 +2,7 @@ import React, { createContext, useContext, useEffect, useRef, useState } from 'r
 import type { User, Session } from '@supabase/supabase-js';
 import { supabase } from '../lib/supabase';
 import type { Profile } from '../lib/supabase';
+import { persistAgeIfNeeded } from '../screens/AgeScreen';
 
 type AuthContextType = {
   user: User | null;
@@ -61,6 +62,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setUser(session?.user ?? null);
       if (session?.user) {
         loadProfile(session.user.id);
+        persistAgeIfNeeded();
       } else {
         setProfile(null);
       }

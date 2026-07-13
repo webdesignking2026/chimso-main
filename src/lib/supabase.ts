@@ -23,6 +23,7 @@ export type Profile = {
   bio: string;
   avatar_url: string;
   cover_url: string;
+  age: number | null;
   onboarding_complete: boolean;
   follower_count: number;
   following_count: number;

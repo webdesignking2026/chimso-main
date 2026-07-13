@@ -358,28 +358,53 @@ export default function FeedScreen() {
           position: 'sticky',
           top: 0,
           zIndex: 200,
-          bgcolor: 'rgba(255,255,255,0.92)',
-          backdropFilter: 'blur(12px)',
-          WebkitBackdropFilter: 'blur(12px)',
           borderBottom: '1px solid',
           borderColor: 'divider',
+          background: 'linear-gradient(135deg, rgba(15, 61, 145, 0.03) 0%, rgba(15, 61, 145, 0.06) 100%)',
+          backdropFilter: 'blur(12px)',
+          WebkitBackdropFilter: 'blur(12px)',
+          '&::before': {
+            content: '""',
+            position: 'absolute',
+            inset: 0,
+            opacity: 0.4,
+            backgroundImage:
+              'radial-gradient(circle at 20% 50%, rgba(15, 61, 145, 0.04) 0%, transparent 50%), radial-gradient(circle at 80% 50%, rgba(15, 61, 145, 0.03) 0%, transparent 50%)',
+            pointerEvents: 'none',
+          },
         }}
       >
-        <Container maxWidth="sm" sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', py: 3 }}>
+        <Container
+          maxWidth="sm"
+          sx={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            py: 3,
+            position: 'relative',
+          }}
+        >
           <Stack direction="row" alignItems="center" spacing={2}>
             <Box
               component="img"
               src="/chimsologo.png"
               alt="Chimso"
-              sx={{ width: 28, height: 28, borderRadius: '8px' }}
+              sx={{ width: 32, height: 32, borderRadius: '9px' }}
             />
-            <Typography variant="h5" sx={{ color: 'text.primary' }}>
+            <Typography variant="h5" sx={{ color: 'text.primary', fontWeight: 700, letterSpacing: '-0.01em' }}>
               Chimso
             </Typography>
           </Stack>
           <Avatar
             src={profile?.avatar_url || undefined}
-            sx={{ width: 34, height: 34, fontSize: '0.75rem', cursor: 'pointer' }}
+            sx={{
+              width: 36,
+              height: 36,
+              fontSize: '0.75rem',
+              cursor: 'pointer',
+              border: '2px solid',
+              borderColor: 'primary.light',
+            }}
           >
             {profile?.display_name ? initials(profile.display_name) : '?'}
           </Avatar>
